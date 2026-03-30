@@ -387,4 +387,17 @@ def build_frontend_from_config(cfg) -> RGBDInstanceFrontend:
             state_dict = checkpoint.get("model_state_dict", checkpoint)
             frontend.load_state_dict(state_dict, strict=False)
         return frontend
+    if frontend_mode == "sam2":
+        from networks.frontends.sam2_frontend import SAM2AutoFrontend
+
+        return SAM2AutoFrontend(
+            sam2_checkpoint=getattr(cfg, "sam2_checkpoint", None),
+            sam2_model_cfg=getattr(cfg, "sam2_model_cfg", None),
+            points_per_side=getattr(cfg, "sam2_points_per_side", 32),
+            pred_iou_thresh=getattr(cfg, "sam2_pred_iou_thresh", 0.88),
+            stability_score_thresh=getattr(cfg, "sam2_stability_score_thresh", 0.95),
+            min_mask_area=getattr(cfg, "sam2_min_mask_area", 1000),
+            max_masks=getattr(cfg, "sam2_max_masks", 1),
+            device=cfg.device,
+        )
     raise ValueError(f"Unsupported frontend_mode: {frontend_mode}")

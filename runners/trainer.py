@@ -216,6 +216,100 @@ def train_scale(cfg, train_loader, val_loader, test_loader, scale_agent, score_a
             ''' save (ema) model '''
             scale_agent.save_ckpt()
 
+def train_classification(cfg, train_loader, val_loader, score_agent):
+    """Train classification head only (Stage 1: freeze encoder, train MLP).
+
+    Expects each batch from train_loader to contain 'class_label' with integer
+    class indices (0-5 for the 6 workpiece categories).
+    """
+    import torch.nn.functional as F
+
+    if not hasattr(score_agent.net, 'classification_head'):
+        raise RuntimeError("classification_enabled must be True to train classification head")
+
+    # Freeze everything except classification_head
+    for name, param in score_agent.net.named_parameters():
+        if 'classification_head' not in name:
+            param.requires_grad = False
+
+    cls_optimizer = torch.optim.Adam(
+        score_agent.net.classification_head.parameters(), lr=cfg.lr
+    )
+    cls_scheduler = torch.optim.lr_scheduler.ExponentialLR(cls_optimizer, gamma=cfg.lr_decay)
+
+    best_val_acc = 0.0
+    for epoch in range(cfg.n_epochs):
+        score_agent.net.train()
+        torch.cuda.empty_cache()
+        pbar = tqdm(train_loader)
+        total_loss = 0.0
+        total_correct = 0
+        total_samples = 0
+
+        for i, batch_sample in enumerate(pbar):
+            batch_sample = process_batch(
+                batch_sample=batch_sample,
+                device=cfg.device,
+                pose_mode=cfg.pose_mode,
+                PTS_AUG_PARAMS=cfg.PTS_AUG_PARAMS,
+            )
+
+            with torch.no_grad():
+                pts_feat = score_agent.net(batch_sample, mode='pts_feature')
+                dino_global = score_agent.net.dino(batch_sample['roi_rgb'])
+            cls_input = torch.cat([pts_feat, dino_global], dim=-1)
+            class_logits = score_agent.net.classification_head(cls_input)
+            loss = F.cross_entropy(class_logits, batch_sample['class_label'])
+
+            cls_optimizer.zero_grad()
+            loss.backward()
+            cls_optimizer.step()
+
+            pred_cls = torch.argmax(class_logits, dim=-1)
+            total_correct += (pred_cls == batch_sample['class_label']).sum().item()
+            total_samples += batch_sample['class_label'].shape[0]
+            total_loss += loss.item()
+            pbar.set_description(
+                f"CLS_EPOCH_{epoch}[{i}/{len(pbar)}]"
+                f"[loss: {loss.item():.4f}, acc: {total_correct/total_samples:.4f}]"
+            )
+
+        cls_scheduler.step()
+        train_acc = total_correct / max(total_samples, 1)
+        print(f"Epoch {epoch}: train_loss={total_loss/max(len(train_loader),1):.4f}, train_acc={train_acc:.4f}")
+
+        # Validation
+        if val_loader is not None and epoch % cfg.eval_freq == 0:
+            score_agent.net.eval()
+            val_correct = 0
+            val_total = 0
+            with torch.no_grad():
+                for batch_sample in val_loader:
+                    batch_sample = process_batch(
+                        batch_sample=batch_sample,
+                        device=cfg.device,
+                        pose_mode=cfg.pose_mode,
+                    )
+                    pts_feat = score_agent.net(batch_sample, mode='pts_feature')
+                    dino_global = score_agent.net.dino(batch_sample['roi_rgb'])
+                    cls_input = torch.cat([pts_feat, dino_global], dim=-1)
+                    class_logits = score_agent.net.classification_head(cls_input)
+                    pred_cls = torch.argmax(class_logits, dim=-1)
+                    val_correct += (pred_cls == batch_sample['class_label']).sum().item()
+                    val_total += batch_sample['class_label'].shape[0]
+            val_acc = val_correct / max(val_total, 1)
+            print(f"Epoch {epoch}: val_acc={val_acc:.4f}")
+            if val_acc > best_val_acc:
+                best_val_acc = val_acc
+                score_agent.save_ckpt('best_cls')
+
+    # Unfreeze all parameters for potential Stage 2 joint training
+    for param in score_agent.net.parameters():
+        param.requires_grad = True
+
+    print(f"Classification training complete. Best val_acc={best_val_acc:.4f}")
+
+
 def main():
     # load config
     cfg = get_config()

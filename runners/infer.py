@@ -96,6 +96,7 @@ class GenPose2:
     def _inference_score(self, data, score_agent: PoseNet, prev_pose=None, T0=None):
         all_pred_pose = []
         all_score_feature = []
+        all_class_logits = []
 
         for i, batch_sample in enumerate([data.get_objects()]):
             _prev_pose = None
@@ -122,10 +123,14 @@ class GenPose2:
                     ),
                 }
             )
+            class_logits = batch_sample.get("class_logits")
+            all_class_logits.append(
+                None if class_logits is None else class_logits.cpu()
+            )
             if i % 4 == 3:
                 gc.collect()
 
-        return all_pred_pose, all_score_feature
+        return all_pred_pose, all_score_feature, all_class_logits
 
     def _inference_energy(self, data, energy_agent: PoseNet, all_pred_pose):
         all_pred_energy = []
@@ -287,7 +292,7 @@ class GenPose2:
                 prev_pose_genpose2.append(pose_genpose2)
 
         infer_T0 = tracking_T0 if tracking and prev_pose is not None else None
-        all_pred_pose, all_score_feature = self._inference_score(
+        all_pred_pose, all_score_feature, all_class_logits = self._inference_score(
             data, self.score_agent, prev_pose_genpose2, infer_T0
         )
         if self.cfg.pretrained_energy_model_path is not None:
@@ -302,7 +307,14 @@ class GenPose2:
             data, self.scale_agent, all_score_feature, all_aggregated_pose
         )
 
-        return all_final_pose, all_final_length
+        all_class_predictions = None
+        if any(cl is not None for cl in all_class_logits):
+            all_class_predictions = [
+                torch.argmax(cl, dim=-1) if cl is not None else None
+                for cl in all_class_logits
+            ]
+
+        return all_final_pose, all_final_length, all_class_predictions
 
 
 def create_genpose2(
@@ -326,10 +338,14 @@ class FrontendGenPose2:
         self.frontend = frontend or ProvidedMaskFrontend(
             min_pixels=self.pose_backend.cfg.frontend_min_pixels
         )
+        cfg = self.pose_backend.cfg
         self.builder = builder or PoseInstanceBuilder(
-            img_size=self.pose_backend.cfg.img_size,
-            n_points=self.pose_backend.cfg.num_points,
-            device=self.pose_backend.cfg.device,
+            img_size=cfg.img_size,
+            n_points=cfg.num_points,
+            device=cfg.device,
+            denoise_enabled=getattr(cfg, "pcl_denoise_enabled", False),
+            denoise_nb_neighbors=getattr(cfg, "pcl_denoise_nb_neighbors", 20),
+            denoise_std_ratio=getattr(cfg, "pcl_denoise_std_ratio", 2.0),
         )
 
     def build_dataset_from_raw(self, data: dict) -> FrontendInferDataset:
@@ -348,10 +364,10 @@ class FrontendGenPose2:
         tracking_T0: float = 0.15,
     ):
         dataset = self.build_dataset_from_raw(data)
-        pose, length = self.pose_backend.inference(
+        pose, length, class_preds = self.pose_backend.inference(
             dataset, prev_pose, tracking, tracking_T0
         )
-        return dataset, pose, length
+        return dataset, pose, length, class_preds
 
     def inference_from_frame(
         self,
@@ -367,10 +383,10 @@ class FrontendGenPose2:
             builder=self.builder,
             device=self.pose_backend.cfg.device,
         )
-        pose, length = self.pose_backend.inference(
+        pose, length, class_preds = self.pose_backend.inference(
             dataset, prev_pose, tracking, tracking_T0
         )
-        return dataset, pose, length
+        return dataset, pose, length, class_preds
 
 
 def create_frontend_genpose2(

@@ -6,6 +6,15 @@ from typing import Any
 import numpy as np
 import torch
 
+WORKPIECE_CLASSES = {
+    0: "盖板",       # cover_plate
+    1: "方管",       # square_tube
+    2: "喇叭口",     # flared_opening
+    3: "H型钢",      # h_beam
+    4: "坡口",       # bevel
+    5: "槽钢",       # channel_steel
+}
+
 
 @dataclass
 class CameraIntrinsics:

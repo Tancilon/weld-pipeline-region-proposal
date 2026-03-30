@@ -4,6 +4,7 @@ from typing import Any
 
 import cv2
 import numpy as np
+import open3d as o3d
 import torch
 from cutoop.transform import pixel2xyz
 
@@ -22,11 +23,20 @@ from utils.sgpa_utils import get_bbox
 
 class PoseInstanceBuilder:
     def __init__(
-        self, img_size: int = 224, n_points: int = 1024, device: str = "cuda"
+        self,
+        img_size: int = 224,
+        n_points: int = 1024,
+        device: str = "cuda",
+        denoise_enabled: bool = False,
+        denoise_nb_neighbors: int = 20,
+        denoise_std_ratio: float = 2.0,
     ) -> None:
         self.img_size = img_size
         self.n_points = n_points
         self.device = device
+        self.denoise_enabled = denoise_enabled
+        self.denoise_nb_neighbors = denoise_nb_neighbors
+        self.denoise_std_ratio = denoise_std_ratio
 
     def build_batch(
         self, frame: RGBDFrame, frontend_output: FrontendBatchOutput
@@ -194,6 +204,10 @@ class PoseInstanceBuilder:
             roi_coord_2d.permute(1, 2, 0).cpu().numpy(),
             valid,
         )
+        if self.denoise_enabled:
+            pcl_in = self._statistical_outlier_removal(
+                pcl_in, self.denoise_nb_neighbors, self.denoise_std_ratio
+            )
         ids, pcl_in = sample_points(pcl_in, self.n_points)
         xs = torch.as_tensor(xs, dtype=torch.int64)[ids]
         ys = torch.as_tensor(ys, dtype=torch.int64)[ids]
@@ -284,6 +298,22 @@ class PoseInstanceBuilder:
         ys = point_tensors["roi_ys"] // 14
         pos = xs * token_grid + ys
         return patch_tokens[pos]
+
+    @staticmethod
+    def _statistical_outlier_removal(
+        points: torch.Tensor, nb_neighbors: int = 20, std_ratio: float = 2.0
+    ) -> torch.Tensor:
+        pts_np = points.cpu().numpy() if isinstance(points, torch.Tensor) else points
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(pts_np)
+        _, inlier_indices = pcd.remove_statistical_outlier(
+            nb_neighbors=nb_neighbors, std_ratio=std_ratio
+        )
+        if len(inlier_indices) < 10:
+            return points
+        if isinstance(points, torch.Tensor):
+            return points[inlier_indices]
+        return torch.as_tensor(pts_np[inlier_indices], dtype=torch.float32)
 
     @staticmethod
     def _to_numpy(value: Any) -> np.ndarray:

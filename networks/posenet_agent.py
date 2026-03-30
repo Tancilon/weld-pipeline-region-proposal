@@ -171,9 +171,9 @@ class PoseNet(nn.Module):
         print("Loading checkpoint from {} ...".format(load_path))
         
         if isinstance(self.net, nn.DataParallel):
-            self.net.module.load_state_dict(checkpoint['model_state_dict'])
+            self.net.module.load_state_dict(checkpoint['model_state_dict'], strict=False)
         else:
-            self.net.load_state_dict(checkpoint['model_state_dict'])
+            self.net.load_state_dict(checkpoint['model_state_dict'], strict=False)
         
         if not load_model_only:
             self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
@@ -313,7 +313,7 @@ class PoseNet(nn.Module):
         """ One step of training """
         self.net.train()
         self.is_testing = False
-        
+
         data['pts_feat'] = self.net(data, mode='pts_feature')
         data['rgb_feat'] = self.net(data, mode='rgb_feature')
         with torch.no_grad():
@@ -322,7 +322,19 @@ class PoseNet(nn.Module):
             pts_feat_teacher = None if teacher_model is None else teacher_model(data, mode='pts_feature')
         self.pts_feature = True
         gf_losses = self.collect_score_loss(data, teacher_model, pts_feat_teacher)
-        
+
+        if (
+            hasattr(self.net, 'classification_enabled')
+            and self.net.classification_enabled
+            and 'class_label' in data
+        ):
+            import torch.nn.functional as F
+            class_logits = self.net(data, mode='classify')
+            cls_weight = getattr(self.cfg, 'classification_loss_weight', 1.0)
+            gf_losses['cls'] = cls_weight * F.cross_entropy(
+                class_logits, data['class_label']
+            )
+
         self.update_network(gf_losses)
         self.record_losses(gf_losses, 'train')
         self.record_lr()
@@ -349,7 +361,12 @@ class PoseNet(nn.Module):
         return cls_losses
     
     def encode_func(self, data):
-        data['pts_feat'] = self.net(data, mode='pts_feature')
+        result = self.net(data, mode='pts_feature_and_classify')
+        if isinstance(result, tuple):
+            data['pts_feat'], data['class_logits'] = result
+        else:
+            data['pts_feat'] = result
+            data['class_logits'] = None
         data['rgb_feat'] = self.net(data, mode='rgb_feature')
 
     def train_func(self, data, pose_samples=None, gf_mode='score', teacher_model=None):
@@ -456,6 +473,12 @@ class PoseNet(nn.Module):
         with torch.no_grad():
             data['pts_feat'] = self.net(data, mode='pts_feature')
             data['rgb_feat'] = self.net(data, mode='rgb_feature')
+
+            class_logits = None
+            if hasattr(self.net, 'classification_enabled') and self.net.classification_enabled:
+                class_logits = self.net(data, mode='classify')
+            data['class_logits'] = class_logits
+
             bs = data['pts'].shape[0]
             self.pts_feature = True
             

@@ -49,6 +49,27 @@ def get_config():
         "--freeze_frontend_backbone", default=False, action="store_true"
     )
 
+    """ SAM2 frontend """
+    parser.add_argument("--sam2_checkpoint", type=str, default=None)
+    parser.add_argument("--sam2_model_cfg", type=str, default=None)
+    parser.add_argument("--sam2_points_per_side", type=int, default=32)
+    parser.add_argument("--sam2_pred_iou_thresh", type=float, default=0.88)
+    parser.add_argument("--sam2_stability_score_thresh", type=float, default=0.95)
+    parser.add_argument("--sam2_min_mask_area", type=int, default=1000)
+    parser.add_argument("--sam2_max_masks", type=int, default=1)
+
+    """ point cloud denoising """
+    parser.add_argument("--pcl_denoise_enabled", default=False, action="store_true")
+    parser.add_argument("--pcl_denoise_nb_neighbors", type=int, default=20)
+    parser.add_argument("--pcl_denoise_std_ratio", type=float, default=2.0)
+
+    """ classification branch """
+    parser.add_argument("--classification_enabled", default=False, action="store_true")
+    parser.add_argument("--classification_num_classes", type=int, default=6)
+    parser.add_argument("--classification_hidden_dim", type=int, default=256)
+    parser.add_argument("--classification_dropout", type=float, default=0.3)
+    parser.add_argument("--classification_loss_weight", type=float, default=1.0)
+
     """ training """
     parser.add_argument(
         "--agent_type",
@@ -145,6 +166,7 @@ def get_config():
         "provided_mask",
         "external",
         "dinov2_scaffold",
+        "sam2",
     ]
 
     return cfg

@@ -110,7 +110,22 @@ class GFObjectPose(nn.Module):
                 s_theta_mode=self.cfg.s_theta_mode,
                 norm_energy=self.cfg.norm_energy,
             )
-        """ ToDo: ranking network """
+        """ classification branch """
+        self.classification_enabled = getattr(cfg, "classification_enabled", False)
+        self.num_classes = getattr(cfg, "classification_num_classes", 6)
+        if self.classification_enabled:
+            cls_hidden = getattr(cfg, "classification_hidden_dim", 256)
+            cls_dropout = getattr(cfg, "classification_dropout", 0.3)
+            # input = pts_feat(1024) + DINOv2 global CLS token(dino_dim)
+            cls_input_dim = 1024 + self.dino_dim
+            self.classification_head = nn.Sequential(
+                nn.Linear(cls_input_dim, cls_hidden),
+                nn.ReLU(inplace=True),
+                nn.Dropout(cls_dropout),
+                nn.Linear(cls_hidden, cls_hidden // 2),
+                nn.ReLU(inplace=True),
+                nn.Linear(cls_hidden // 2, self.num_classes),
+            )
 
     def extract_pts_feature(self, data):
         """extract the input pointcloud feature
@@ -285,6 +300,23 @@ class GFObjectPose(nn.Module):
         elif mode == "ode_sample":
             in_process_sample, res = self.sample(data, "ode", init_x=init_x, T0=T0)
             return in_process_sample, res
+        elif mode == "classify":
+            if not self.classification_enabled:
+                return None
+            pts_feat = self.extract_pts_feature(data)
+            with torch.no_grad():
+                dino_global = self.dino(data["roi_rgb"])
+            cls_input = torch.cat([pts_feat, dino_global], dim=-1)
+            return self.classification_head(cls_input)
+        elif mode == "pts_feature_and_classify":
+            pts_feat = self.extract_pts_feature(data)
+            class_logits = None
+            if self.classification_enabled:
+                with torch.no_grad():
+                    dino_global = self.dino(data["roi_rgb"])
+                cls_input = torch.cat([pts_feat, dino_global], dim=-1)
+                class_logits = self.classification_head(cls_input)
+            return pts_feat, class_logits
         else:
             raise NotImplementedError
 
