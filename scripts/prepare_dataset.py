@@ -13,7 +13,7 @@
       --data_dir data/aiws5.1-dataset-test \
       --mode sam2 \
       --sam2_checkpoint path/to/sam2.1_hiera_tiny.pt \
-      --sam2_model_cfg camera/configs/sam2.1/sam2.1_hiera_t.yaml
+      --sam2_model_cfg configs/sam2.1/sam2.1_hiera_t.yaml
 
   # 深度阈值 fallback（无需 SAM2，适合单工件+平面桌面场景）
   python scripts/prepare_dataset.py \
@@ -359,7 +359,7 @@ def main():
                         help="Output path for obj_meta.json")
     # SAM2 参数
     parser.add_argument("--sam2_checkpoint", type=str, default=None)
-    parser.add_argument("--sam2_model_cfg", type=str, default="camera/configs/sam2.1/sam2.1_hiera_t.yaml")
+    parser.add_argument("--sam2_model_cfg", type=str, default="configs/sam2.1/sam2.1_hiera_t.yaml")
     parser.add_argument("--sam2_points_per_side", type=int, default=32)
     parser.add_argument("--sam2_pred_iou_thresh", type=float, default=0.88)
     parser.add_argument("--sam2_stability_score_thresh", type=float, default=0.95)
