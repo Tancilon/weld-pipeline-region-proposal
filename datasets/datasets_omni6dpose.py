@@ -737,6 +737,9 @@ def process_batch(batch_sample, device, pose_mode="quat_wxyz", PTS_AUG_PARAMS=No
     processed_sample["zero_mean_gt_pose"][:, -3:] -= zero_mean
     processed_sample["pts_center"] = zero_mean
 
+    if "class_label" in batch_sample:
+        processed_sample["class_label"] = batch_sample["class_label"].to(device)
+
     return processed_sample
 
 
