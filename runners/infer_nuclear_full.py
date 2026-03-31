@@ -2,6 +2,13 @@
 Full pipeline inference for nuclear workpieces:
 RGB + Depth -> Segmentation -> 6D Pose (+ optional EnergyNet / ScaleNet).
 
+Architecture note:
+  - Segmentation runs in a dedicated SegNet-style agent with query injection.
+  - 6D pose runs in a separate pure GenPose2 score agent.
+  - EnergyNet / ScaleNet remain pure GenPose2 agents.
+This file intentionally avoids the older "segmentation + pose hybrid backbone"
+path because it degraded pose quality.
+
 Usage:
     python runners/infer_nuclear_full.py \
         --nuclear_data_path ./data/aiws5.2_nuclear_workpieces \
@@ -67,6 +74,8 @@ from datasets.datasets_nuclear import (
     NuclearWorkpieceDataset,
 )
 from datasets.datasets_omni6dpose import Omni6DPoseDataSet
+from cutoop.data_types import CameraIntrinsicsBase
+from cutoop.eval_utils import DetectMatch
 from networks.reward import sort_poses_by_energy
 from utils.datasets_utils import aug_bbox_eval, crop_resize_by_warp_affine, get_2d_coord_np
 from utils.misc import average_quaternion_batch
@@ -136,15 +145,8 @@ def put_text(img_bgr, text, x, y, text_color=(255, 255, 255),
 # Checkpoint loading
 # --------------------------------------------------------------------------- #
 
-def load_checkpoints(agent, seg_ckpt_path, pose_ckpt_path=None):
-    """Load seg and (optionally) pose checkpoints into the model.
-
-    Strategy:
-      1. Load seg_ckpt — provides trained EoMT head, query_embed, last-N DINOv2 blocks.
-      2. Load pose_ckpt (if given) — overwrites pts_encoder and pose_score_net with
-         the trained pose weights; deliberately skips dino_wrapper.* so the
-         seg-tuned DINOv2 blocks from step 1 are preserved.
-    """
+def load_segmentation_agent_checkpoint(agent, seg_ckpt_path):
+    """Load the SegNet-style checkpoint used only for mask prediction."""
     print(f"Loading seg checkpoint: {seg_ckpt_path}")
     seg_ckpt = torch.load(seg_ckpt_path, map_location="cpu")
     missing, unexpected = agent.net.load_state_dict(
@@ -154,21 +156,6 @@ def load_checkpoints(agent, seg_ckpt_path, pose_ckpt_path=None):
         print(f"  [seg ckpt] Missing keys ({len(missing)}): {missing[:5]} ...")
     if unexpected:
         print(f"  [seg ckpt] Unexpected keys ({len(unexpected)}): {unexpected[:5]} ...")
-
-    if pose_ckpt_path is not None:
-        print(f"Loading pose checkpoint: {pose_ckpt_path}")
-        pose_ckpt = torch.load(pose_ckpt_path, map_location="cpu")
-        pose_state = pose_ckpt["model_state_dict"]
-
-        # Only load pose-branch weights; skip seg/DINOv2-wrapper keys so the
-        # seg-trained DINOv2 blocks are NOT overwritten.
-        SEG_PREFIXES = ("eomt_head.", "dino_wrapper.")
-        filtered = {k: v for k, v in pose_state.items()
-                    if not any(k.startswith(p) for p in SEG_PREFIXES)}
-        m2, u2 = agent.net.load_state_dict(filtered, strict=False)
-        print(f"  Loaded {len(filtered)} pose-branch tensors.")
-        if m2:
-            print(f"  [pose ckpt] Missing keys ({len(m2)}): {m2[:5]} ...")
 
 
 def load_model_only(agent, ckpt_path, name):
@@ -182,6 +169,23 @@ def load_model_only(agent, ckpt_path, name):
         print(f"  [{name} ckpt] Missing keys ({len(missing)}): {missing[:5]} ...")
     if unexpected:
         print(f"  [{name} ckpt] Unexpected keys ({len(unexpected)}): {unexpected[:5]} ...")
+
+
+def load_pure_pose_score_checkpoint(agent, pose_ckpt_path=None, fallback_seg_ckpt_path=None):
+    """Load the pure GenPose2 score agent used for downstream 6D pose.
+
+    Preferred source is the original pose checkpoint. If it is unavailable,
+    optionally fall back to the segmentation checkpoint to preserve the old
+    "pose weights embedded in seg ckpt" behaviour.
+    """
+    if pose_ckpt_path is not None:
+        load_model_only(agent, pose_ckpt_path, "pose")
+        return
+    if fallback_seg_ckpt_path is not None:
+        print("Pose checkpoint not provided; falling back to seg checkpoint for score weights.")
+        load_model_only(agent, fallback_seg_ckpt_path, "seg-as-pose")
+        return
+    raise ValueError("Either pose_ckpt_path or fallback_seg_ckpt_path must be provided")
 
 
 # --------------------------------------------------------------------------- #
@@ -413,25 +417,33 @@ def infer_pose_and_size(score_agent, energy_agent, scale_agent, cfg, pt_data,
 # Visualisation
 # --------------------------------------------------------------------------- #
 
-def draw_pose_axes(img_bgr, R, t, K_33, axis_len=0.05):
-    """Project object coordinate axes onto the image."""
-    origin = t.reshape(3, 1)
-    axes_3d = np.eye(3) * axis_len         # [3, 3] each column is one axis end
-    pts_3d = np.hstack([origin, origin + R @ axes_3d])   # [3, 4]
-    # Project
-    uvw = K_33 @ pts_3d                    # [3, 4]
-    uv  = (uvw[:2] / uvw[2]).T.astype(int) # [4, 2]
-    o = tuple(uv[0])
-    for i, color in enumerate(AXIS_COLORS):
-        e = tuple(uv[i + 1])
-        cv2.arrowedLine(img_bgr, o, e, color, 2, tipLength=0.3)
-    return img_bgr
+def draw_3d_bbox_and_axes(img_bgr, R, t, size, camera_intrinsics, axes_length=0.1):
+    """Draw original GenPose2-style 3D bbox and pose axes."""
+    affine = np.eye(4, dtype=np.float32)
+    affine[:3, :3] = R.astype(np.float32)
+    affine[:3, 3] = t.astype(np.float32)
+    size = np.asarray(size, dtype=np.float32)
+    return DetectMatch._draw_image(
+        vis_img=img_bgr,
+        pred_affine=affine,
+        pred_size=size,
+        gt_affine=None,
+        gt_size=None,
+        gt_sym_label=None,
+        camera_intrinsics=camera_intrinsics,
+        draw_pred=True,
+        draw_gt=False,
+        draw_label=False,
+        draw_pred_axes_length=axes_length,
+        draw_gt_axes_length=None,
+        thickness=True,
+    )
 
 
-def visualize_result(rgb_orig, instances, K_33, img_size):
-    """Draw masks + pose axes on the original RGB image.
+def visualize_result(rgb_orig, instances, camera_intrinsics, img_size):
+    """Draw masks + original GenPose2-style 3D bbox/axes on the RGB image.
 
-    instances: list of dicts with keys cls_id, score, mask_orig, R, t.
+    instances: list of dicts with keys cls_id, score, mask_orig, R, t, size.
     """
     vis = rgb_orig.copy()
     im_H, im_W = vis.shape[:2]
@@ -462,9 +474,20 @@ def visualize_result(rgb_orig, instances, K_33, img_size):
             vis = put_text(vis, label, cx, max(cy - 25, 0),
                            text_color=(255, 255, 255), bg_color=color)
 
-        # Pose axes
-        if inst.get("R") is not None and inst.get("t") is not None:
-            vis = draw_pose_axes(vis, inst["R"], inst["t"], K_33)
+        # Original GenPose2-style 3D bbox + axes
+        if (
+            inst.get("R") is not None
+            and inst.get("t") is not None
+            and inst.get("size") is not None
+        ):
+            vis = draw_3d_bbox_and_axes(
+                vis,
+                inst["R"],
+                inst["t"],
+                inst["size"],
+                camera_intrinsics,
+                axes_length=0.1,
+            )
 
     return vis
 
@@ -524,18 +547,28 @@ def build_cfg(args, agent_type="score", enable_segmentation=False):
     return cfg
 
 
-def init_agents(args):
-    """Build segmentation/score agent and optional energy/scale agents."""
-    score_cfg = build_cfg(args, agent_type="score", enable_segmentation=True)
-    print("Building score+segmentation model...")
+def init_pipeline_agents(args):
+    """Build the pipeline as separate segmentation and pure GenPose2 agents."""
+    seg_cfg = build_cfg(args, agent_type="score", enable_segmentation=True)
+    print("Building segmentation agent (SegNet path)...")
+    seg_agent = PoseNet(seg_cfg)
+    load_segmentation_agent_checkpoint(seg_agent, args.seg_ckpt_path)
+    seg_agent.net.eval()
+
+    score_cfg = build_cfg(args, agent_type="score", enable_segmentation=False)
+    print("Building pure GenPose2 score agent (no segmentation wrapper)...")
     score_agent = PoseNet(score_cfg)
-    load_checkpoints(score_agent, args.seg_ckpt_path, args.pose_ckpt_path)
+    load_pure_pose_score_checkpoint(
+        score_agent,
+        pose_ckpt_path=args.pose_ckpt_path,
+        fallback_seg_ckpt_path=args.seg_ckpt_path,
+    )
     score_agent.net.eval()
 
     energy_agent = None
     if args.energy_ckpt_path:
         energy_cfg = build_cfg(args, agent_type="energy", enable_segmentation=False)
-        print("Building energy model...")
+        print("Building pure GenPose2 energy agent...")
         energy_agent = PoseNet(energy_cfg)
         load_model_only(energy_agent, args.energy_ckpt_path, "energy")
         energy_agent.net.eval()
@@ -543,16 +576,16 @@ def init_agents(args):
     scale_agent = None
     if args.scale_ckpt_path:
         scale_cfg = build_cfg(args, agent_type="scale", enable_segmentation=False)
-        print("Building scale model...")
+        print("Building pure GenPose2 scale agent...")
         scale_agent = PoseNet(scale_cfg)
         load_model_only(scale_agent, args.scale_ckpt_path, "scale")
         scale_agent.net.eval()
 
-    return score_cfg, score_agent, energy_agent, scale_agent
+    return seg_cfg, score_cfg, seg_agent, score_agent, energy_agent, scale_agent
 
 
 def read_meta(meta_path):
-    """Return (K_33 np.float32, img_H, img_W) from a meta JSON."""
+    """Return camera intrinsics in both matrix and object forms."""
     with open(meta_path) as f:
         meta = json.load(f)
     cam = meta["camera"]["intrinsics"]
@@ -561,7 +594,15 @@ def read_meta(meta_path):
         [      0, cam["fy"], cam["cy"]],
         [      0,       0,        1  ],
     ], dtype=np.float32)
-    return K, int(cam["height"]), int(cam["width"])
+    intrinsics = CameraIntrinsicsBase(
+        fx=cam["fx"],
+        fy=cam["fy"],
+        cx=cam["cx"],
+        cy=cam["cy"],
+        width=cam["width"],
+        height=cam["height"],
+    )
+    return K, int(cam["height"]), int(cam["width"]), intrinsics
 
 
 def main():
@@ -569,13 +610,14 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
     device = args.device if torch.cuda.is_available() else "cpu"
 
-    # ---- Build model and load weights ----
-    cfg, score_agent, energy_agent, scale_agent = init_agents(args)
+    # ---- Build separate segmentation and pure GenPose2 agents ----
+    seg_cfg, score_cfg, seg_agent, score_agent, energy_agent, scale_agent = \
+        init_pipeline_agents(args)
 
     # ---- Load val/train annotation list ----
     ann_file = os.path.join(args.nuclear_data_path, "annotations", f"{args.split}.json")
     dataset = NuclearWorkpieceDataset(
-        cfg=cfg,
+        cfg=seg_cfg,
         data_dir=args.nuclear_data_path,
         annotation_file=ann_file,
         mode="seg",
@@ -601,13 +643,13 @@ def main():
                                 cv2.IMREAD_ANYCOLOR | cv2.IMREAD_ANYDEPTH)
         if depth_orig is not None and len(depth_orig.shape) == 3:
             depth_orig = depth_orig[:, :, 0]                       # take first channel
-        K_33, im_H, im_W = read_meta(meta_path)
+        K_33, im_H, im_W, camera_intrinsics = read_meta(meta_path)
 
-        # ---- Segmentation ----
+        # ---- Segmentation (top-1 mask from SegNet path) ----
         batch = collate_nuclear([sample])
         batch = process_batch_seg(batch, device)
         with torch.no_grad():
-            class_logits, mask_logits = score_agent.net(batch, mode="segmentation")
+            class_logits, mask_logits = seg_agent.net(batch, mode="segmentation")
         pred_masks, pred_classes, pred_scores = postprocess_seg(
             class_logits[0], mask_logits[0], args.score_threshold)
 
@@ -648,13 +690,13 @@ def main():
                 instances.append(inst_info)
                 continue
 
-            # ---- Pose estimation ----
+            # ---- Pure GenPose2 pose + size inference ----
             try:
                 pose_res = infer_pose_and_size(
                     score_agent=score_agent,
                     energy_agent=energy_agent,
                     scale_agent=scale_agent,
-                    cfg=cfg,
+                    cfg=score_cfg,
                     pt_data=pt_data,
                     device=device,
                     repeat_num=args.repeat_num,
@@ -676,7 +718,7 @@ def main():
             instances.append(inst_info)
 
         # ---- Visualise ----
-        vis = visualize_result(rgb_orig, instances, K_33, args.img_size)
+        vis = visualize_result(rgb_orig, instances, camera_intrinsics, args.img_size)
         out_path = os.path.join(args.output_dir,
                                 f"{args.split}_{img_info['file_name']}")
         cv2.imwrite(out_path, vis)
