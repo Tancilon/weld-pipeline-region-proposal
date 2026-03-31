@@ -46,6 +46,7 @@ sys.argv = sys.argv[:1]
 import cv2
 import torch
 import numpy as np
+from PIL import Image, ImageDraw, ImageFont
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
@@ -53,6 +54,84 @@ from datasets.datasets_nuclear import (
     NuclearWorkpieceDataset, CLASS_NAMES, NUM_CLASSES, collate_nuclear, process_batch_seg
 )
 from networks.posenet_agent import PoseNet
+
+
+# --------------------------------------------------------------------------- #
+# Chinese-capable text rendering via PIL
+# --------------------------------------------------------------------------- #
+
+def _load_cjk_font(size=22):
+    """Return a PIL font that can render CJK characters."""
+    candidates = [
+        # Linux (Debian/Ubuntu)
+        '/usr/share/fonts/truetype/wqy/wqy-microhei.ttc',
+        '/usr/share/fonts/wqy-microhei/wqy-microhei.ttc',
+        '/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc',
+        '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',
+        '/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc',
+        '/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc',
+        # macOS
+        '/System/Library/Fonts/PingFang.ttc',
+        '/Library/Fonts/Arial Unicode.ttf',
+        # Windows
+        'C:/Windows/Fonts/msyh.ttc',
+        'C:/Windows/Fonts/simhei.ttf',
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            try:
+                return ImageFont.truetype(path, size)
+            except Exception:
+                continue
+    # Fallback: PIL built-in (no CJK, but won't crash)
+    print("[Warning] No CJK font found. Chinese labels will not render correctly. "
+          "Install wqy-microhei: sudo apt-get install fonts-wqy-microhei")
+    return ImageFont.load_default()
+
+
+_CJK_FONT = None  # lazy-loaded singleton
+
+
+def _get_font(size=22):
+    global _CJK_FONT
+    if _CJK_FONT is None:
+        _CJK_FONT = _load_cjk_font(size)
+    return _CJK_FONT
+
+
+def put_text(img_bgr, text, x, y, text_color_bgr=(255, 255, 255),
+             bg_color_bgr=None, font_size=22):
+    """Draw *text* on *img_bgr* at pixel (x, y) using PIL (supports CJK).
+
+    Args:
+        img_bgr: numpy uint8 BGR image (modified in-place clone).
+        text: string to draw (may contain Chinese characters).
+        x, y: top-left anchor of the text.
+        text_color_bgr: text colour in BGR.
+        bg_color_bgr: if given, draw a filled rectangle behind the text.
+        font_size: font size in pixels.
+
+    Returns:
+        numpy uint8 BGR image with text rendered.
+    """
+    font = _get_font(font_size)
+    # Convert BGR → RGB PIL image
+    pil_img = Image.fromarray(cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB))
+    draw = ImageDraw.Draw(pil_img)
+
+    text_color_rgb = text_color_bgr[::-1]
+
+    if bg_color_bgr is not None:
+        bg_color_rgb = bg_color_bgr[::-1]
+        bbox = draw.textbbox((x, y), text, font=font)  # (left, top, right, bottom)
+        pad = 3
+        draw.rectangle(
+            [bbox[0] - pad, bbox[1] - pad, bbox[2] + pad, bbox[3] + pad],
+            fill=bg_color_rgb,
+        )
+
+    draw.text((x, y), text, font=font, fill=text_color_rgb)
+    return cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
 
 
 # Per-class colors (BGR for cv2)
@@ -107,10 +186,8 @@ def visualize_one(rgb_orig, pred_masks, pred_classes, pred_scores,
             else:
                 cx, cy = contours[0][0][0]
             label = f"{CLASS_NAMES[cls_id]} {score:.2f}"
-            (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
-            cv2.rectangle(pred_vis, (cx, cy - th - 4), (cx + tw, cy + 4), color, -1)
-            cv2.putText(pred_vis, label, (cx, cy),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+            pred_vis = put_text(pred_vis, label, cx, cy,
+                                text_color_bgr=(255, 255, 255), bg_color_bgr=color)
 
     if gt_masks is not None and gt_classes is not None:
         gt_vis = rgb_orig.copy()
@@ -132,16 +209,14 @@ def visualize_one(rgb_orig, pred_masks, pred_classes, pred_scores,
                 else:
                     cx, cy = contours[0][0][0]
                 label = f"{CLASS_NAMES[cls_id]} (GT)"
-                (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
-                cv2.rectangle(gt_vis, (cx, cy - th - 4), (cx + tw, cy + 4), color, -1)
-                cv2.putText(gt_vis, label, (cx, cy),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                gt_vis = put_text(gt_vis, label, cx, cy,
+                                  text_color_bgr=(255, 255, 255), bg_color_bgr=color)
 
         vis = np.concatenate([gt_vis, pred_vis], axis=1)
-        cv2.putText(vis, "Ground Truth", (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
-        cv2.putText(vis, "Prediction", (w + 10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
+        vis = put_text(vis, "Ground Truth", 10, 8,
+                       text_color_bgr=(255, 255, 255), bg_color_bgr=(0, 0, 0), font_size=28)
+        vis = put_text(vis, "Prediction", w + 10, 8,
+                       text_color_bgr=(255, 255, 255), bg_color_bgr=(0, 0, 0), font_size=28)
     else:
         vis = pred_vis
 
