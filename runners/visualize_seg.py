@@ -232,26 +232,27 @@ def postprocess_predictions(class_logits, mask_logits, score_threshold=0.5):
         score_threshold: minimum confidence to keep a prediction.
 
     Returns:
-        masks: list of [H, W] numpy arrays (sigmoid probabilities).
-        classes: list of int class indices.
-        scores: list of float confidence scores.
+        masks/classes/scores containing at most one prediction:
+        the highest-confidence instance above threshold.
     """
     probs = class_logits.softmax(dim=-1)  # [N, C+1]
     obj_probs = probs[:, :-1]             # [N, C] exclude no-object
     max_scores, max_classes = obj_probs.max(dim=-1)
 
-    masks, classes, scores = [], [], []
+    best = None
     for i in range(len(max_scores)):
         score = max_scores[i].item()
         if score < score_threshold:
             continue
         cls_id = max_classes[i].item()
         mask = mask_logits[i].sigmoid().cpu().numpy()
-        masks.append(mask)
-        classes.append(cls_id)
-        scores.append(score)
+        if best is None or score > best[2]:
+            best = (mask, cls_id, score)
 
-    return masks, classes, scores
+    if best is None:
+        return [], [], []
+    mask, cls_id, score = best
+    return [mask], [cls_id], [score]
 
 
 def main():
