@@ -35,10 +35,33 @@ def get_config():
     parser.add_argument('--norm_energy', type=str, default='identical')
     parser.add_argument('--dino', type=str, default='pointwise') # none / global / pointwise
     parser.add_argument('--scale_embedding', type=int, default=180)
-    
-    
+
+
+    """ EoMT segmentation """
+    parser.add_argument('--enable_segmentation', default=False, action='store_true',
+                        help='enable EoMT segmentation/classification head on DINOv2')
+    parser.add_argument('--num_queries', type=int, default=50,
+                        help='number of learnable query tokens for EoMT')
+    parser.add_argument('--query_inject_layer', type=int, default=-4,
+                        help='inject queries starting from this layer (negative = from end)')
+    parser.add_argument('--num_object_classes', type=int, default=6,
+                        help='number of object categories (excluding no-object class)')
+    parser.add_argument('--seg_loss_weight', type=float, default=1.0,
+                        help='weight for segmentation mask loss')
+    parser.add_argument('--cls_loss_weight', type=float, default=2.0,
+                        help='weight for classification loss')
+    parser.add_argument('--unfreeze_dino_last_n', type=int, default=0,
+                        help='unfreeze last N DINOv2 layers for segmentation fine-tuning (0=all frozen)')
+    parser.add_argument('--dataset_type', type=str, default='omni6dpose',
+                        help='dataset type: omni6dpose / nuclear')
+    parser.add_argument('--nuclear_data_path', type=str, default='',
+                        help='path to nuclear workpiece dataset')
+    parser.add_argument('--annotation_file', type=str, default='',
+                        help='path to COCO-format annotation JSON')
+
+
     """ training """
-    parser.add_argument('--agent_type', type=str, default='score', help='one of the [score, energy, energy_with_ranking, scale]')
+    parser.add_argument('--agent_type', type=str, default='score', help='one of the [score, energy, energy_with_ranking, scale, segmentation]')
     parser.add_argument('--pretrained_score_model_path', type=str)
     parser.add_argument('--pretrained_energy_model_path', type=str)
     parser.add_argument('--pretrained_scale_model_path', type=str)

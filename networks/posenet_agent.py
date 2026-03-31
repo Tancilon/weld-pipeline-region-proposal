@@ -17,6 +17,7 @@ from networks.gf_algorithms.losses import loss_fn, loss_fn_edm
 from networks.gf_algorithms.sde import init_sde
 from networks.posenet import GFObjectPose
 from networks.scalenet import ScaleNet
+from networks.eomt_head import EoMTCriterion
 
 # from networks.gf_algorithms.sde_backup import ExponentialMovingAverage, loss_fn, loss_fn_edm, init_sde
 # from networks.gf_algorithms.energynet import GFObjectPose
@@ -70,6 +71,15 @@ class PoseNet(nn.Module):
             self.loss_fn = functools.partial(loss_fn_edm, sigma_data=1.4148, P_mean=-1.2, P_std=1.2)
         else:
             self.loss_fn = loss_fn
+
+        # EoMT segmentation criterion
+        if getattr(self.cfg, 'enable_segmentation', False):
+            self.seg_criterion = EoMTCriterion(
+                num_classes=self.cfg.num_object_classes,
+                cls_weight=self.cfg.cls_loss_weight,
+                mask_weight=self.cfg.seg_loss_weight * 5.0,
+                dice_weight=self.cfg.seg_loss_weight * 5.0,
+            )
          
 
     def get_network(self, name):
@@ -171,9 +181,9 @@ class PoseNet(nn.Module):
         print("Loading checkpoint from {} ...".format(load_path))
         
         if isinstance(self.net, nn.DataParallel):
-            self.net.module.load_state_dict(checkpoint['model_state_dict'])
+            self.net.module.load_state_dict(checkpoint['model_state_dict'], strict=False)
         else:
-            self.net.load_state_dict(checkpoint['model_state_dict'])
+            self.net.load_state_dict(checkpoint['model_state_dict'], strict=False)
         
         if not load_model_only:
             self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
@@ -348,6 +358,45 @@ class PoseNet(nn.Module):
         self.pts_feature = False
         return cls_losses
     
+    def train_seg_func(self, data):
+        """One step of segmentation head training."""
+        self.net.train()
+        self.is_testing = False
+
+        # Forward: DINOv2 with queries → segmentation head
+        class_logits, mask_logits = self.net(data, mode='segmentation')
+
+        # Compute losses via Hungarian matching
+        seg_losses = self.seg_criterion(
+            class_logits, mask_logits,
+            data['gt_classes'], data['gt_masks'],
+        )
+
+        self.update_network({'seg': seg_losses['total_loss']})
+        self.record_losses(seg_losses, 'train')
+        self.record_lr()
+
+        self.ema.update(self.net.parameters())
+        return seg_losses
+
+    def eval_seg_func(self, data, data_mode):
+        """Evaluate segmentation head."""
+        self.is_testing = True
+        self.net.eval()
+        self.ema.store(self.net.parameters())
+        self.ema.copy_to(self.net.parameters())
+
+        with torch.no_grad():
+            class_logits, mask_logits = self.net(data, mode='segmentation')
+            seg_losses = self.seg_criterion(
+                class_logits, mask_logits,
+                data['gt_classes'], data['gt_masks'],
+            )
+            self.record_losses(seg_losses, data_mode)
+
+        self.ema.restore(self.net.parameters())
+        return seg_losses
+
     def encode_func(self, data):
         data['pts_feat'] = self.net(data, mode='pts_feature')
         data['rgb_feat'] = self.net(data, mode='rgb_feature')
@@ -359,6 +408,8 @@ class PoseNet(nn.Module):
             losses = self.train_energy_func(data, pose_samples)
         elif gf_mode == 'scale':
             losses = self.train_scale_func(data)
+        elif gf_mode == 'segmentation':
+            losses = self.train_seg_func(data)
         else:
             raise NotImplementedError
         return losses
@@ -445,6 +496,8 @@ class PoseNet(nn.Module):
             losses = self.eval_energy_func(data, data_mode, pose_samples)
         elif gf_mode == 'scale':
             metric = self.eval_scale_func(data, data_mode)
+        elif gf_mode == 'segmentation':
+            losses = self.eval_seg_func(data, data_mode)
         else:
             raise NotImplementedError
         

@@ -16,7 +16,8 @@ from tqdm import tqdm
 
 # from datasets.datasets_nocs import get_data_loaders_from_cfg, process_batch
 from datasets.datasets_omni6dpose import get_data_loaders_from_cfg, process_batch, array_to_SymLabel
-from networks.posenet_agent import PoseNet 
+from datasets.datasets_nuclear import get_nuclear_data_loaders, process_batch_seg
+from networks.posenet_agent import PoseNet
 from configs.config import get_config
 from utils.misc import exists_or_mkdir, get_pose_representation
 from utils.genpose_utils import merge_results
@@ -216,12 +217,83 @@ def train_scale(cfg, train_loader, val_loader, test_loader, scale_agent, score_a
             ''' save (ema) model '''
             scale_agent.save_ckpt()
 
+def freeze_pose_params(agent):
+    """Freeze all parameters except EoMT segmentation head and query embeddings."""
+    net = agent.net.module if isinstance(agent.net, torch.nn.DataParallel) else agent.net
+    # Freeze everything first
+    for param in net.parameters():
+        param.requires_grad = False
+    # Unfreeze EoMT components
+    if hasattr(net, 'eomt_head'):
+        for param in net.eomt_head.parameters():
+            param.requires_grad = True
+    if hasattr(net, 'dino_wrapper'):
+        for param in net.dino_wrapper.query_embed.parameters():
+            param.requires_grad = True
+        # Optionally unfreeze last N DINOv2 layers
+        unfreeze_n = getattr(agent.cfg, 'unfreeze_dino_last_n', 0)
+        if unfreeze_n > 0:
+            for block in net.dino_wrapper.dino.blocks[-unfreeze_n:]:
+                for param in block.parameters():
+                    param.requires_grad = True
+
+    trainable = sum(p.numel() for p in net.parameters() if p.requires_grad)
+    total = sum(p.numel() for p in net.parameters())
+    print(f"[freeze_pose_params] Trainable: {trainable:,} / Total: {total:,}")
+
+
+def train_segmentation(cfg, train_loader, val_loader, seg_agent):
+    """Train EoMT segmentation/classification head.
+
+    Args:
+        cfg: Config namespace.
+        train_loader: Training data loader (NuclearWorkpieceDataset).
+        val_loader: Validation data loader.
+        seg_agent: PoseNet agent with enable_segmentation=True.
+    """
+    for epoch in range(seg_agent.clock.epoch, cfg.n_epochs):
+        torch.cuda.empty_cache()
+        pbar = tqdm(train_loader)
+        for i, batch_sample in enumerate(pbar):
+            # Warm up
+            if seg_agent.clock.step < cfg.warmup:
+                seg_agent.update_learning_rate()
+
+            batch_sample = process_batch_seg(batch_sample, cfg.device)
+            losses = seg_agent.train_func(data=batch_sample, gf_mode='segmentation')
+
+            loss_vals = [f"{k}:{v.item():.4f}" for k, v in losses.items()]
+            pbar.set_description(f"EPOCH_{epoch}[{i}/{len(pbar)}][{', '.join(loss_vals)}]")
+            seg_agent.clock.tick()
+
+        seg_agent.update_learning_rate()
+        seg_agent.clock.tock()
+
+        # Evaluation
+        if seg_agent.clock.epoch % cfg.eval_freq == 0:
+            if val_loader is not None:
+                val_batch = next(iter(val_loader))
+                val_batch = process_batch_seg(val_batch, cfg.device)
+                seg_agent.eval_func(val_batch, 'val', gf_mode='segmentation')
+            seg_agent.save_ckpt()
+
+
 def main():
     # load config
     cfg = get_config()
     
     ''' Init data loader '''
-    if not (cfg.eval or cfg.pred):
+    if getattr(cfg, 'dataset_type', 'omni6dpose') == 'nuclear':
+        # Nuclear workpiece dataset for segmentation training
+        data_loaders = get_nuclear_data_loaders(cfg, data_type=['train', 'val'])
+        train_loader = data_loaders.get('train_loader')
+        val_loader = data_loaders.get('val_loader')
+        test_loader = val_loader  # reuse val as test for nuclear dataset
+        if train_loader:
+            print('train_set: ', len(train_loader))
+        if val_loader:
+            print('val_set: ', len(val_loader))
+    elif not (cfg.eval or cfg.pred):
         data_loaders = get_data_loaders_from_cfg(cfg=cfg, data_type=['train', 'val', 'test'])
         train_loader = data_loaders['train_loader']
         val_loader = data_loaders['val_loader']
@@ -231,7 +303,7 @@ def main():
         print('test_set: ', len(test_loader))
     else:
         data_loaders = get_data_loaders_from_cfg(cfg=cfg, data_type=['test'])
-        test_loader = data_loaders['test_loader']   
+        test_loader = data_loaders['test_loader']
         print('test_set: ', len(test_loader))
   
     
@@ -270,6 +342,16 @@ def main():
         cfg.agent_type = 'scale'
         scale_agent = PoseNet(cfg)
         tr_agent = scale_agent
+
+    elif cfg.agent_type == 'segmentation':
+        cfg.enable_segmentation = True
+        seg_agent = PoseNet(cfg)
+        # Load pretrained pose weights (score network) if available
+        if cfg.pretrained_score_model_path:
+            seg_agent.load_ckpt(model_dir=cfg.pretrained_score_model_path,
+                                model_path=True, load_model_only=True)
+        freeze_pose_params(seg_agent)
+        tr_agent = seg_agent
     else:
         raise NotImplementedError
     
@@ -297,6 +379,8 @@ def main():
             train_energy(cfg, train_loader, val_loader, test_loader, tr_agent)
     elif cfg.agent_type == 'energy_with_ranking':
         train_energy(cfg, train_loader, val_loader, test_loader, tr_agent, score_agent, True)
+    elif cfg.agent_type == 'segmentation':
+        train_segmentation(cfg, train_loader, val_loader, tr_agent)
     else:
         train_scale(cfg, train_loader, val_loader, test_loader, tr_agent, score_agent)
 if __name__ == '__main__':

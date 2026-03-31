@@ -13,6 +13,8 @@ from networks.gf_algorithms.scorenet import PoseScoreNet, PoseDecoderNet
 from networks.gf_algorithms.energynet import PoseEnergyNet
 from networks.gf_algorithms.sde import init_sde
 from networks.scalenet import ScaleNet
+from networks.dino_wrapper import DINOv2WithQueries
+from networks.eomt_head import EoMTHead
 from configs.config import get_config
 from utils.genpose_utils import encode_axes
 
@@ -40,11 +42,35 @@ class GFObjectPose(nn.Module):
         # self.prior_fn, self.marginal_prob_fn, self.sde_fn, self.sampling_eps = init_sde(cfg.sde_mode)
         
         ''' dino v2 '''
+        self.enable_segmentation = getattr(cfg, 'enable_segmentation', False)
         if cfg.dino != 'none':
-            self.dino : nn.Module = torch.hub.load('facebookresearch/dinov2', GFObjectPose.dino_name).to(cfg.device)
-            self.dino.requires_grad_(False)
+            raw_dino = torch.hub.load('facebookresearch/dinov2', GFObjectPose.dino_name).to(cfg.device)
             self.dino_dim = GFObjectPose.dino_dim
             self.embedding_dim = GFObjectPose.embedding_dim
+
+            if self.enable_segmentation:
+                # Wrap DINOv2 with query injection for EoMT segmentation
+                self.dino_wrapper = DINOv2WithQueries(
+                    raw_dino,
+                    num_query_tokens=cfg.num_queries,
+                    query_inject_layer=cfg.query_inject_layer,
+                )
+                self.eomt_head = EoMTHead(
+                    embed_dim=self.dino_dim,
+                    num_classes=cfg.num_object_classes,
+                    num_queries=cfg.num_queries,
+                )
+                # Freeze DINOv2 backbone, optionally unfreeze last N layers
+                raw_dino.requires_grad_(False)
+                unfreeze_n = getattr(cfg, 'unfreeze_dino_last_n', 0)
+                if unfreeze_n > 0:
+                    for block in raw_dino.blocks[-unfreeze_n:]:
+                        block.requires_grad_(True)
+                # Keep reference for non-segmentation code paths
+                self.dino = raw_dino
+            else:
+                self.dino = raw_dino
+                self.dino.requires_grad_(False)
         
         ''' encode pts '''
         if self.cfg.pts_encoder == 'pointnet':
@@ -104,7 +130,17 @@ class GFObjectPose(nn.Module):
         pts = data['pts']
         if self.cfg.dino == 'pointwise':
             roi_rgb = data['roi_rgb']
-            feat = self.dino.get_intermediate_layers(roi_rgb)[0]
+
+            if self.enable_segmentation:
+                # Use wrapper: get pose-branch patch tokens + cache seg tokens
+                patch_for_pose, query_out, patch_after_query = \
+                    self.dino_wrapper.forward_with_queries(roi_rgb)
+                feat = patch_for_pose  # [bs, 256, 384] detached from query branch
+                data['_query_tokens'] = query_out
+                data['_patch_tokens_seg'] = patch_after_query
+            else:
+                feat = self.dino.get_intermediate_layers(roi_rgb)[0]
+
             xs = data['roi_xs'] // 14
             ys = data['roi_ys'] // 14
             pos = xs * 16 + ys
@@ -224,6 +260,22 @@ class GFObjectPose(nn.Module):
             #         positional_embedding.append(fn(exponent * data['roi_center_dir'][:, i].reshape(-1, 1)))
             # positional_embedding = torch.concat(positional_embedding, dim=-1)
             # return torch.concat([self.dino(rgb), positional_embedding], dim=-1)
+        elif mode == 'segmentation':
+            assert self.enable_segmentation, "enable_segmentation must be True"
+            # Run DINOv2 with queries if not already cached
+            if '_query_tokens' not in data:
+                roi_rgb = data['roi_rgb']
+                patch_for_pose, query_out, patch_after_query = \
+                    self.dino_wrapper.forward_with_queries(roi_rgb)
+                data['_query_tokens'] = query_out
+                data['_patch_tokens_seg'] = patch_after_query
+            img_size = (self.cfg.img_size, self.cfg.img_size)
+            patch_hw = (self.cfg.img_size // 14, self.cfg.img_size // 14)
+            class_logits, mask_logits = self.eomt_head(
+                data['_query_tokens'], data['_patch_tokens_seg'],
+                patch_hw=patch_hw, img_size=img_size,
+            )
+            return class_logits, mask_logits
         elif mode == 'pc_sample':
             in_process_sample, res = self.sample(data, 'pc', init_x=init_x)
             return in_process_sample, res
