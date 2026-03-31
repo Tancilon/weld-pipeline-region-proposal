@@ -17,6 +17,32 @@ Usage:
 import sys
 import os
 import argparse
+
+# --------------------------------------------------------------------------- #
+# IMPORTANT: Parse our own args BEFORE any downstream imports.
+# networks/pts_encoder/pointnet2.py calls get_config() at module level, which
+# in turn calls parser.parse_args().  If our custom flags are still in sys.argv
+# at that point, argparse raises "unrecognized arguments".  We parse them here
+# first, then strip sys.argv down to just the program name so get_config() sees
+# a clean argument list.
+# --------------------------------------------------------------------------- #
+_vis_parser = argparse.ArgumentParser(description="Visualize EoMT segmentation results")
+_vis_parser.add_argument("--nuclear_data_path", type=str, required=True)
+_vis_parser.add_argument("--ckpt_path", type=str, required=True,
+                         help="Path to trained SegNet checkpoint")
+_vis_parser.add_argument("--split", type=str, default="val", choices=["train", "val"])
+_vis_parser.add_argument("--output_dir", type=str, default="./results/vis_seg")
+_vis_parser.add_argument("--num_vis", type=int, default=20,
+                         help="Max number of images to visualize")
+_vis_parser.add_argument("--score_threshold", type=float, default=0.5)
+_vis_parser.add_argument("--device", type=str, default="cuda")
+_vis_parser.add_argument("--img_size", type=int, default=224)
+_args = _vis_parser.parse_args()
+
+# Strip custom flags so get_config()'s parse_args() doesn't see them
+sys.argv = sys.argv[:1]
+
+# Now safe to import modules that trigger get_config() at import time
 import cv2
 import torch
 import numpy as np
@@ -27,17 +53,16 @@ from datasets.datasets_nuclear import (
     NuclearWorkpieceDataset, CLASS_NAMES, NUM_CLASSES, collate_nuclear, process_batch_seg
 )
 from networks.posenet_agent import PoseNet
-from configs.config import get_config
 
 
 # Per-class colors (BGR for cv2)
 COLORS = [
-    (0, 0, 255),     # 盖板 - red
-    (0, 255, 0),     # 方管 - green
+    (0, 0, 255),     # 盖板   - red
+    (0, 255, 0),     # 方管   - green
     (255, 0, 0),     # 喇叭口 - blue
-    (0, 255, 255),   # H型钢 - yellow
-    (255, 0, 255),   # 槽钢 - magenta
-    (255, 255, 0),   # 坡口 - cyan
+    (0, 255, 255),   # H型钢  - yellow
+    (255, 0, 255),   # 槽钢   - magenta
+    (255, 255, 0),   # 坡口   - cyan
 ]
 
 
@@ -62,7 +87,6 @@ def visualize_one(rgb_orig, pred_masks, pred_classes, pred_scores,
     # Prediction overlay
     pred_vis = rgb_orig.copy()
     for mask, cls_id, score in zip(pred_masks, pred_classes, pred_scores):
-        # Resize mask to original image size
         mask_resized = cv2.resize(mask.astype(np.float32), (w, h),
                                   interpolation=cv2.INTER_LINEAR)
         binary = (mask_resized > 0.5).astype(np.uint8)
@@ -72,11 +96,9 @@ def visualize_one(rgb_orig, pred_masks, pred_classes, pred_scores,
         overlay[binary == 1] = color
         pred_vis = cv2.addWeighted(overlay, alpha, pred_vis, 1 - alpha, 0)
 
-        # Draw contour
         contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         cv2.drawContours(pred_vis, contours, -1, color, 2)
 
-        # Label
         if len(contours) > 0:
             M = cv2.moments(contours[0])
             if M["m00"] > 0:
@@ -91,7 +113,6 @@ def visualize_one(rgb_orig, pred_masks, pred_classes, pred_scores,
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
     if gt_masks is not None and gt_classes is not None:
-        # GT overlay
         gt_vis = rgb_orig.copy()
         for mask, cls_id in zip(gt_masks, gt_classes):
             mask_resized = cv2.resize(mask.astype(np.float32), (w, h),
@@ -116,9 +137,7 @@ def visualize_one(rgb_orig, pred_masks, pred_classes, pred_scores,
                 cv2.putText(gt_vis, label, (cx, cy),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
-        # Side by side: GT | Prediction
         vis = np.concatenate([gt_vis, pred_vis], axis=1)
-        # Add headers
         cv2.putText(vis, "Ground Truth", (10, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
         cv2.putText(vis, "Prediction", (w + 10, 30),
@@ -143,20 +162,16 @@ def postprocess_predictions(class_logits, mask_logits, score_threshold=0.5):
         scores: list of float confidence scores.
     """
     probs = class_logits.softmax(dim=-1)  # [N, C+1]
-    # For each query, get best non-background class
-    obj_probs = probs[:, :-1]  # [N, C] exclude no-object
-    max_scores, max_classes = obj_probs.max(dim=-1)  # [N], [N]
+    obj_probs = probs[:, :-1]             # [N, C] exclude no-object
+    max_scores, max_classes = obj_probs.max(dim=-1)
 
-    masks = []
-    classes = []
-    scores = []
-
+    masks, classes, scores = [], [], []
     for i in range(len(max_scores)):
         score = max_scores[i].item()
         if score < score_threshold:
             continue
         cls_id = max_classes[i].item()
-        mask = mask_logits[i].sigmoid().cpu().numpy()  # [H, W]
+        mask = mask_logits[i].sigmoid().cpu().numpy()
         masks.append(mask)
         classes.append(cls_id)
         scores.append(score)
@@ -165,23 +180,11 @@ def postprocess_predictions(class_logits, mask_logits, score_threshold=0.5):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Visualize EoMT segmentation results")
-    parser.add_argument("--nuclear_data_path", type=str, required=True)
-    parser.add_argument("--ckpt_path", type=str, required=True,
-                        help="Path to trained SegNet checkpoint")
-    parser.add_argument("--split", type=str, default="val", choices=["train", "val"])
-    parser.add_argument("--output_dir", type=str, default="./results/vis_seg")
-    parser.add_argument("--num_vis", type=int, default=20,
-                        help="Max number of images to visualize")
-    parser.add_argument("--score_threshold", type=float, default=0.5)
-    parser.add_argument("--device", type=str, default="cuda")
-    parser.add_argument("--img_size", type=int, default=224)
-    args = parser.parse_args()
+    args = _args  # parsed at module level before imports
 
     os.makedirs(args.output_dir, exist_ok=True)
 
-    # Build a minimal config for model construction
-    # We construct it manually to avoid argparse conflicts
+    # Build a minimal config for model construction (avoids calling get_config() again)
     class Cfg:
         pass
 
@@ -189,7 +192,7 @@ def main():
     cfg.device = args.device if torch.cuda.is_available() else "cpu"
     cfg.dino = "pointwise"
     cfg.pts_encoder = "pointnet2"
-    cfg.agent_type = "score"  # needed for GFObjectPose init
+    cfg.agent_type = "score"
     cfg.pose_mode = "rot_matrix"
     cfg.regression_head = "Rx_Ry_and_T"
     cfg.sde_mode = "ve"
@@ -229,11 +232,10 @@ def main():
     agent.load_ckpt(model_dir=args.ckpt_path, model_path=True, load_model_only=True)
     agent.net.eval()
 
-    # Load EMA weights
+    # Apply EMA weights
     agent.ema.store(agent.net.parameters())
     agent.ema.copy_to(agent.net.parameters())
 
-    # Load dataset
     ann_file = os.path.join(args.nuclear_data_path, "annotations", f"{args.split}.json")
     dataset = NuclearWorkpieceDataset(
         cfg=cfg,
@@ -244,52 +246,45 @@ def main():
     )
 
     num_vis = min(args.num_vis, len(dataset))
-    print(f"Visualizing {num_vis} images from {args.split} split...")
+    print(f"Visualizing {num_vis} images from '{args.split}' split...")
 
     for idx in range(num_vis):
         sample = dataset[idx]
         img_id = sample["image_id"].item()
 
-        # Load original RGB for visualization
         img_info = dataset.coco.loadImgs(img_id)[0]
         img_path = os.path.join(args.nuclear_data_path, "images", img_info["file_name"])
-        rgb_orig = cv2.imread(img_path)  # BGR
+        rgb_orig = cv2.imread(img_path)
 
-        # Prepare batch (single image)
         batch = collate_nuclear([sample])
         batch = process_batch_seg(batch, cfg.device)
 
-        # Inference
         with torch.no_grad():
             class_logits, mask_logits = agent.net(batch, mode="segmentation")
-            # class_logits: [1, N, C+1], mask_logits: [1, N, H, W]
 
-        # Post-process
         pred_masks, pred_classes, pred_scores = postprocess_predictions(
             class_logits[0], mask_logits[0], args.score_threshold
         )
 
-        # GT masks
         n_inst = sample["num_instances"].item()
         gt_masks_np = sample["gt_masks"][:n_inst].numpy()
         gt_classes_np = sample["gt_classes"][:n_inst].numpy().tolist()
 
-        # Visualize
         vis = visualize_one(
             rgb_orig, pred_masks, pred_classes, pred_scores,
             gt_masks=gt_masks_np, gt_classes=gt_classes_np,
         )
 
-        # Save
         out_name = f"{args.split}_{img_info['file_name']}"
         out_path = os.path.join(args.output_dir, out_name)
         cv2.imwrite(out_path, vis)
-        pred_info = ", ".join(f"{CLASS_NAMES[c]}({s:.2f})" for c, s in zip(pred_classes, pred_scores))
-        print(f"  [{idx+1}/{num_vis}] {img_info['file_name']}: {pred_info if pred_info else 'no detections'} -> {out_name}")
+        pred_info = ", ".join(
+            f"{CLASS_NAMES[c]}({s:.2f})" for c, s in zip(pred_classes, pred_scores)
+        )
+        print(f"  [{idx+1}/{num_vis}] {img_info['file_name']}: "
+              f"{pred_info if pred_info else 'no detections'} -> {out_name}")
 
-    # Restore original weights
     agent.ema.restore(agent.net.parameters())
-
     print(f"\nDone! Visualizations saved to: {args.output_dir}")
 
 
