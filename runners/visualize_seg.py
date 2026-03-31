@@ -225,6 +225,8 @@ def main():
     cfg.query_inject_layer = -4
     cfg.num_object_classes = 6
     cfg.unfreeze_dino_last_n = 4
+    cfg.seg_loss_weight = 1.0
+    cfg.cls_loss_weight = 2.0
 
     print("Building model...")
     agent = PoseNet(cfg)
