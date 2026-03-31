@@ -232,11 +232,10 @@ def main():
     agent = PoseNet(cfg)
     print(f"Loading checkpoint: {args.ckpt_path}")
     agent.load_ckpt(model_dir=args.ckpt_path, model_path=True, load_model_only=True)
+    # NOTE: save_ckpt() already applies ema.copy_to() before saving model_state_dict,
+    # so the checkpoint weights are already EMA-averaged. Do NOT call ema.copy_to()
+    # here — the ema shadow is freshly random-initialized and would overwrite good weights.
     agent.net.eval()
-
-    # Apply EMA weights
-    agent.ema.store(agent.net.parameters())
-    agent.ema.copy_to(agent.net.parameters())
 
     ann_file = os.path.join(args.nuclear_data_path, "annotations", f"{args.split}.json")
     dataset = NuclearWorkpieceDataset(
@@ -286,7 +285,6 @@ def main():
         print(f"  [{idx+1}/{num_vis}] {img_info['file_name']}: "
               f"{pred_info if pred_info else 'no detections'} -> {out_name}")
 
-    agent.ema.restore(agent.net.parameters())
     print(f"\nDone! Visualizations saved to: {args.output_dir}")
 
 
