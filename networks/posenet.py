@@ -61,7 +61,7 @@ class GFObjectPose(nn.Module):
                     num_classes=cfg.num_object_classes,
                     num_queries=cfg.num_queries,
                 )
-                # Freeze DINOv2 backbone, optionally unfreeze last N layers
+                # Freeze DINOv2 backbone inside the wrapper contract.
                 raw_dino.requires_grad_(False)
                 # Keep reference for non-segmentation code paths
                 self.dino = raw_dino

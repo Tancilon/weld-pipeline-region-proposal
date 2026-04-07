@@ -52,6 +52,12 @@ class FakeDINO(nn.Module):
         return torch.cat([cls, patches], dim=1)
 
 
+class FakeDINOWithNorm(FakeDINO):
+    def __init__(self):
+        super().__init__()
+        self.norm = nn.LayerNorm(self.embed_dim)
+
+
 def test_forward_with_queries_returns_pose_tokens_after_pose_tail():
     wrapper = DINOv2WithQueries(FakeDINO(), num_query_tokens=2, query_inject_layer=2)
 
@@ -105,3 +111,14 @@ def test_forward_segmentation_skips_frozen_pose_tail():
     assert torch.allclose(seg_tokens, torch.full_like(seg_tokens, 18.0))
     assert dino.blocks[2].calls == 0
     assert wrapper.seg_blocks[0].calls == 1
+
+
+def test_wrapper_keeps_seg_norm_trainable_when_input_dino_is_frozen():
+    dino = FakeDINOWithNorm()
+    dino.requires_grad_(False)
+
+    wrapper = DINOv2WithQueries(dino, num_query_tokens=2, query_inject_layer=2)
+
+    assert wrapper.dino.norm is not wrapper.seg_norm
+    assert all(not param.requires_grad for param in wrapper.dino.norm.parameters())
+    assert all(param.requires_grad for param in wrapper.seg_norm.parameters())
