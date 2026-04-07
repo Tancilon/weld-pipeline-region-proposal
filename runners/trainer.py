@@ -217,25 +217,34 @@ def train_scale(cfg, train_loader, val_loader, test_loader, scale_agent, score_a
             ''' save (ema) model '''
             scale_agent.save_ckpt()
 
+def validate_segmentation_pose_init(cfg):
+    """Require a pose-init checkpoint for segmentation training."""
+    pretrained_score_model_path = getattr(cfg, 'pretrained_score_model_path', None)
+    if not pretrained_score_model_path:
+        raise ValueError(
+            "segmentation training requires cfg.pretrained_score_model_path"
+        )
+    return pretrained_score_model_path
+
+
 def freeze_pose_params(agent):
-    """Freeze all parameters except EoMT segmentation head and query embeddings."""
+    """Freeze all parameters except the segmentation head/tail modules."""
     net = agent.net.module if isinstance(agent.net, torch.nn.DataParallel) else agent.net
-    # Freeze everything first
     for param in net.parameters():
         param.requires_grad = False
-    # Unfreeze EoMT components
-    if hasattr(net, 'eomt_head'):
-        for param in net.eomt_head.parameters():
+
+    def _unfreeze(module):
+        if module is None:
+            return
+        for param in module.parameters():
             param.requires_grad = True
-    if hasattr(net, 'dino_wrapper'):
-        for param in net.dino_wrapper.query_embed.parameters():
-            param.requires_grad = True
-        # Optionally unfreeze last N DINOv2 layers
-        unfreeze_n = getattr(agent.cfg, 'unfreeze_dino_last_n', 0)
-        if unfreeze_n > 0:
-            for block in net.dino_wrapper.dino.blocks[-unfreeze_n:]:
-                for param in block.parameters():
-                    param.requires_grad = True
+
+    _unfreeze(getattr(net, 'eomt_head', None))
+    dino_wrapper = getattr(net, 'dino_wrapper', None)
+    if dino_wrapper is not None:
+        _unfreeze(getattr(dino_wrapper, 'query_embed', None))
+        _unfreeze(getattr(dino_wrapper, 'seg_blocks', None))
+        _unfreeze(getattr(dino_wrapper, 'seg_norm', None))
 
     trainable = sum(p.numel() for p in net.parameters() if p.requires_grad)
     total = sum(p.numel() for p in net.parameters())
@@ -345,11 +354,13 @@ def main():
 
     elif cfg.agent_type == 'segmentation':
         cfg.enable_segmentation = True
+        validate_segmentation_pose_init(cfg)
         seg_agent = PoseNet(cfg)
-        # Load pretrained pose weights (score network) if available
-        if cfg.pretrained_score_model_path:
-            seg_agent.load_ckpt(model_dir=cfg.pretrained_score_model_path,
-                                model_path=True, load_model_only=True)
+        seg_agent.load_ckpt(
+            model_dir=cfg.pretrained_score_model_path,
+            model_path=True,
+            load_model_only=True,
+        )
         freeze_pose_params(seg_agent)
         tr_agent = seg_agent
     else:
@@ -385,5 +396,4 @@ def main():
         train_scale(cfg, train_loader, val_loader, test_loader, tr_agent, score_agent)
 if __name__ == '__main__':
     main()
-
 

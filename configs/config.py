@@ -51,7 +51,7 @@ def get_config():
     parser.add_argument('--cls_loss_weight', type=float, default=2.0,
                         help='weight for classification loss')
     parser.add_argument('--unfreeze_dino_last_n', type=int, default=0,
-                        help='unfreeze last N DINOv2 layers for segmentation fine-tuning (0=all frozen)')
+                        help='legacy knob from the old single-tail segmentation flow; ignored by the dual-tail segmentation design')
     parser.add_argument('--dataset_type', type=str, default='omni6dpose',
                         help='dataset type: omni6dpose / nuclear')
     parser.add_argument('--nuclear_data_path', type=str, default='',
@@ -62,7 +62,8 @@ def get_config():
 
     """ training """
     parser.add_argument('--agent_type', type=str, default='score', help='one of the [score, energy, energy_with_ranking, scale, segmentation]')
-    parser.add_argument('--pretrained_score_model_path', type=str)
+    parser.add_argument('--pretrained_score_model_path', type=str,
+                        help='pose-init checkpoint path; required when agent_type=segmentation')
     parser.add_argument('--pretrained_energy_model_path', type=str)
     parser.add_argument('--pretrained_scale_model_path', type=str)
     parser.add_argument('--distillation', default=False, action='store_true')
@@ -134,4 +135,3 @@ def get_config():
     assert cfg.dino in ['none', 'global', 'pointwise']
     
     return cfg
-

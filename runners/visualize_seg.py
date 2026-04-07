@@ -300,7 +300,7 @@ def main():
     cfg.num_queries = 50
     cfg.query_inject_layer = -4
     cfg.num_object_classes = 6
-    cfg.unfreeze_dino_last_n = 4
+    cfg.unfreeze_dino_last_n = 0
     cfg.seg_loss_weight = 1.0
     cfg.cls_loss_weight = 2.0
 
