@@ -3,59 +3,41 @@ Full pipeline inference for nuclear workpieces:
 RGB + Depth -> Segmentation -> 6D Pose (+ optional EnergyNet / ScaleNet).
 
 Architecture note:
-  - Segmentation runs in a dedicated SegNet-style agent with query injection.
-  - 6D pose runs in a separate pure GenPose2 score agent.
-  - EnergyNet / ScaleNet remain pure GenPose2 agents.
-This file intentionally avoids the older "segmentation + pose hybrid backbone"
-path because it degraded pose quality.
+  - Segmentation and 6D pose run through one main segmentation-enabled agent.
+  - EnergyNet / ScaleNet remain optional pure GenPose2 auxiliary agents.
 
 Usage:
     python runners/infer_nuclear_full.py \
         --nuclear_data_path ./data/aiws5.2_nuclear_workpieces \
-        --seg_ckpt_path     ./results/ckpts/SegNet/ckpt_epoch100.pth \
-        --pose_ckpt_path    ./results/ckpts/ScoreNet/scorenet.pth \
-        --energy_ckpt_path  ./results/ckpts/EnergyNet/energynet.pth \
-        --scale_ckpt_path   ./results/ckpts/ScaleNet/scalenet.pth \
+        --seg_ckpt          ./results/ckpts/SegNet/ckpt_epoch100.pth \
+        --energy_ckpt       ./results/ckpts/EnergyNet/energynet.pth \
+        --scale_ckpt        ./results/ckpts/ScaleNet/scalenet.pth \
         --split val \
         --output_dir ./results/full_pipeline \
         --num_vis 5 \
         --score_threshold 0.5
 
-If --pose_ckpt_path is omitted the pose branch uses whatever weights are already
-in the seg checkpoint (e.g. if seg training was started from a pretrained pose model).
-If --energy_ckpt_path is omitted pose hypotheses are aggregated directly from
-the score model outputs. If --scale_ckpt_path is omitted object size is estimated
+If --energy_ckpt is omitted pose hypotheses are aggregated directly from the
+main agent outputs. If --scale_ckpt is omitted object size is estimated
 geometrically from the segmented point cloud and aggregated pose.
 """
 
 import sys
 import os
-import argparse
-import copy
 
 # --------------------------------------------------------------------------- #
 # Parse args FIRST — downstream imports call get_config() at module level and
 # will choke on our custom flags if they reach parse_args() first.
 # --------------------------------------------------------------------------- #
-_p = argparse.ArgumentParser(description="Nuclear workpiece full pipeline inference")
-_p.add_argument("--nuclear_data_path", type=str, required=True)
-_p.add_argument("--seg_ckpt_path",     type=str, required=True)
-_p.add_argument("--pose_ckpt_path",    type=str, default=None,
-                help="Optional pretrained GenPose2 pose checkpoint")
-_p.add_argument("--energy_ckpt_path",  type=str, default=None,
-                help="Optional EnergyNet checkpoint for pose hypothesis ranking")
-_p.add_argument("--scale_ckpt_path",   type=str, default=None,
-                help="Optional ScaleNet checkpoint for object size prediction")
-_p.add_argument("--split",        type=str, default="val", choices=["train", "val"])
-_p.add_argument("--output_dir",   type=str, default="./results/full_pipeline")
-_p.add_argument("--num_vis",      type=int, default=5)
-_p.add_argument("--score_threshold", type=float, default=0.5)
-_p.add_argument("--repeat_num",   type=int, default=10,
-                help="Number of pose hypothesis samples (more = more accurate but slower)")
-_p.add_argument("--num_points",   type=int, default=1024)
-_p.add_argument("--img_size",     type=int, default=224)
-_p.add_argument("--device",       type=str, default="cuda")
-_args = _p.parse_args()
+sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+
+from runners.infer_nuclear_full_lib import (
+    build_arg_parser,
+    infer_pose_and_size,
+    init_pipeline_agents,
+)
+
+_args = build_arg_parser().parse_args()
 
 sys.argv = sys.argv[:1]  # clear argv before heavy imports trigger get_config()
 
@@ -65,9 +47,6 @@ import cv2
 import torch
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
-from sklearn.cluster import DBSCAN
-
-sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
 from datasets.datasets_nuclear import (
     CLASS_NAMES, NUM_CLASSES, collate_nuclear, process_batch_seg,
@@ -76,12 +55,7 @@ from datasets.datasets_nuclear import (
 from datasets.datasets_omni6dpose import Omni6DPoseDataSet
 from cutoop.data_types import CameraIntrinsicsBase
 from cutoop.eval_utils import DetectMatch
-from networks.reward import sort_poses_by_energy
 from utils.datasets_utils import aug_bbox_eval, crop_resize_by_warp_affine, get_2d_coord_np
-from utils.misc import average_quaternion_batch
-from utils.metrics import get_rot_matrix
-from utils.transforms import matrix_to_quaternion, quaternion_to_matrix
-from networks.posenet_agent import PoseNet
 
 
 # --------------------------------------------------------------------------- #
@@ -139,53 +113,6 @@ def put_text(img_bgr, text, x, y, text_color=(255, 255, 255),
         draw.rectangle([bb[0]-2, bb[1]-2, bb[2]+2, bb[3]+2], fill=bg_color[::-1])
     draw.text((x, y), text, font=font, fill=tc_rgb)
     return cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
-
-
-# --------------------------------------------------------------------------- #
-# Checkpoint loading
-# --------------------------------------------------------------------------- #
-
-def load_segmentation_agent_checkpoint(agent, seg_ckpt_path):
-    """Load the SegNet-style checkpoint used only for mask prediction."""
-    print(f"Loading seg checkpoint: {seg_ckpt_path}")
-    seg_ckpt = torch.load(seg_ckpt_path, map_location="cpu")
-    missing, unexpected = agent.net.load_state_dict(
-        seg_ckpt["model_state_dict"], strict=False
-    )
-    if missing:
-        print(f"  [seg ckpt] Missing keys ({len(missing)}): {missing[:5]} ...")
-    if unexpected:
-        print(f"  [seg ckpt] Unexpected keys ({len(unexpected)}): {unexpected[:5]} ...")
-
-
-def load_model_only(agent, ckpt_path, name):
-    """Load a regular GenPose2 checkpoint into a single agent."""
-    print(f"Loading {name} checkpoint: {ckpt_path}")
-    checkpoint = torch.load(ckpt_path, map_location="cpu")
-    missing, unexpected = agent.net.load_state_dict(
-        checkpoint["model_state_dict"], strict=False
-    )
-    if missing:
-        print(f"  [{name} ckpt] Missing keys ({len(missing)}): {missing[:5]} ...")
-    if unexpected:
-        print(f"  [{name} ckpt] Unexpected keys ({len(unexpected)}): {unexpected[:5]} ...")
-
-
-def load_pure_pose_score_checkpoint(agent, pose_ckpt_path=None, fallback_seg_ckpt_path=None):
-    """Load the pure GenPose2 score agent used for downstream 6D pose.
-
-    Preferred source is the original pose checkpoint. If it is unavailable,
-    optionally fall back to the segmentation checkpoint to preserve the old
-    "pose weights embedded in seg ckpt" behaviour.
-    """
-    if pose_ckpt_path is not None:
-        load_model_only(agent, pose_ckpt_path, "pose")
-        return
-    if fallback_seg_ckpt_path is not None:
-        print("Pose checkpoint not provided; falling back to seg checkpoint for score weights.")
-        load_model_only(agent, fallback_seg_ckpt_path, "seg-as-pose")
-        return
-    raise ValueError("Either pose_ckpt_path or fallback_seg_ckpt_path must be provided")
 
 
 # --------------------------------------------------------------------------- #
@@ -301,119 +228,6 @@ def extract_pointcloud(rgb_orig, depth_orig, mask_orig, K_33, img_size, num_poin
 
 
 # --------------------------------------------------------------------------- #
-# Pose and size inference
-# --------------------------------------------------------------------------- #
-
-def build_instance_batch(pt_data, device):
-    """Convert per-instance point-cloud data into a batched network input."""
-    return {
-        "pts":           pt_data["pts"].unsqueeze(0).to(device),
-        "pcl_in":        pt_data["pcl_in"].unsqueeze(0).to(device),
-        "roi_rgb":       pt_data["roi_rgb"].unsqueeze(0).to(device),
-        "roi_xs":        pt_data["roi_xs"].unsqueeze(0).to(device),
-        "roi_ys":        pt_data["roi_ys"].unsqueeze(0).to(device),
-        "pts_center":    pt_data["pts_center"].unsqueeze(0).to(device),
-        "zero_mean_pts": pt_data["zero_mean_pts"].unsqueeze(0).to(device),
-    }
-
-
-def aggregate_pose(cfg, pred_pose, pred_energy=None):
-    """Aggregate pose hypotheses into a single SE(3) pose."""
-    bs, repeat_num, _ = pred_pose.shape
-    if pred_energy is None:
-        good_pose = pred_pose
-    else:
-        sorted_pose, _ = sort_poses_by_energy(pred_pose, pred_energy)
-        retain_num = max(1, int(round(repeat_num * cfg.retain_ratio)))
-        good_pose = sorted_pose[:, :retain_num, :]
-
-    retain_num = good_pose.shape[1]
-    rot_matrix = get_rot_matrix(
-        good_pose[:, :, :-3].reshape(bs * retain_num, -1),
-        cfg.pose_mode,
-    )
-    quat_wxyz = matrix_to_quaternion(rot_matrix).reshape(bs, retain_num, -1)
-    aggregated_quat_wxyz = average_quaternion_batch(quat_wxyz)
-
-    if getattr(cfg, "clustering", 0):
-        min_samples = max(1, int(round(cfg.clustering_minpts * retain_num)))
-        for j in range(bs):
-            pairwise_distance = 1 - torch.sum(
-                quat_wxyz[j].unsqueeze(0) * quat_wxyz[j].unsqueeze(1),
-                dim=2,
-            ) ** 2
-            dbscan = DBSCAN(
-                eps=cfg.clustering_eps,
-                min_samples=min_samples,
-            ).fit(pairwise_distance.cpu().numpy())
-            labels = dbscan.labels_
-            if np.any(labels >= 0):
-                bins = np.bincount(labels[labels >= 0])
-                best_label = np.argmax(bins)
-                aggregated_quat_wxyz[j] = average_quaternion_batch(
-                    quat_wxyz[j, labels == best_label].unsqueeze(0)
-                )[0]
-
-    aggregated_trans = torch.mean(good_pose[:, :, -3:], dim=1)
-    aggregated_pose = torch.zeros(bs, 4, 4, device=pred_pose.device)
-    aggregated_pose[:, 3, 3] = 1.0
-    aggregated_pose[:, :3, :3] = quaternion_to_matrix(aggregated_quat_wxyz)
-    aggregated_pose[:, :3, 3] = aggregated_trans
-    return aggregated_pose
-
-
-def estimate_size_from_geometry(points, pose):
-    """Estimate axis-aligned object size in object frame from segmented points."""
-    rotation = pose[:, :3, :3]
-    translation = pose[:, :3, 3]
-    obj_points = points - translation.unsqueeze(1)
-    obj_points = torch.bmm(rotation.transpose(1, 2), obj_points.transpose(1, 2))
-    obj_points = obj_points.transpose(1, 2)
-    bbox_length, _ = torch.max(torch.abs(obj_points), dim=1)
-    return bbox_length * 2.0
-
-
-def infer_pose_and_size(score_agent, energy_agent, scale_agent, cfg, pt_data,
-                        device, repeat_num):
-    """Run score -> optional energy -> optional scale on one segmented instance."""
-    data = build_instance_batch(pt_data, device)
-
-    pred_pose, _ = score_agent.pred_func(data, repeat_num=repeat_num)
-    pred_energy = None
-    if energy_agent is not None:
-        pred_energy = energy_agent.get_energy(
-            data=data,
-            pose_samples=pred_pose,
-            T=None,
-            mode="test",
-            extract_feature=True,
-        )
-
-    aggregated_pose = aggregate_pose(cfg, pred_pose, pred_energy)
-    final_pose = aggregated_pose.clone()
-
-    if scale_agent is not None:
-        scale_input = {
-            "pts_feat": data["pts_feat"],
-            "rgb_feat": data["rgb_feat"],
-            "axes": aggregated_pose[:, :3, :3],
-        }
-        cal_mat, pred_size = scale_agent.pred_scale_func(scale_input)
-        final_pose[:, :3, :3] = cal_mat
-        size_source = "scale_net"
-    else:
-        pred_size = estimate_size_from_geometry(data["pcl_in"], aggregated_pose)
-        size_source = "geometry"
-
-    return {
-        "R": final_pose[0, :3, :3].detach().cpu().numpy(),
-        "t": final_pose[0, :3, 3].detach().cpu().numpy(),
-        "size": pred_size[0].detach().cpu().numpy(),
-        "size_source": size_source,
-    }
-
-
-# --------------------------------------------------------------------------- #
 # Visualisation
 # --------------------------------------------------------------------------- #
 
@@ -492,98 +306,6 @@ def visualize_result(rgb_orig, instances, camera_intrinsics, img_size):
     return vis
 
 
-# --------------------------------------------------------------------------- #
-# Main
-# --------------------------------------------------------------------------- #
-
-def build_cfg(args, agent_type="score", enable_segmentation=False):
-    class Cfg:
-        pass
-    cfg = Cfg()
-    cfg.device          = args.device if torch.cuda.is_available() else "cpu"
-    cfg.dino            = "pointwise"
-    cfg.pts_encoder     = "pointnet2"
-    cfg.agent_type      = agent_type
-    cfg.pose_mode       = "rot_matrix"
-    cfg.regression_head = "Rx_Ry_and_T"
-    cfg.sde_mode        = "ve"
-    cfg.num_points      = args.num_points
-    cfg.img_size        = args.img_size
-    cfg.pointnet2_params = "light"
-    cfg.parallel        = False
-    cfg.is_train        = False
-    cfg.eval            = False
-    cfg.pred            = False
-    cfg.use_pretrain    = False
-    cfg.log_dir         = "infer_nuclear"
-    cfg.ema_rate        = 0.999
-    cfg.lr              = 1e-4
-    cfg.lr_decay        = 0.99
-    cfg.optimizer       = "Adam"
-    cfg.warmup          = 50
-    cfg.grad_clip       = 1.0
-    cfg.sampling_steps  = 500
-    cfg.sampler_mode    = ["ode"]
-    cfg.energy_mode     = "IP"
-    cfg.s_theta_mode    = "score"
-    cfg.norm_energy     = "identical"
-    cfg.scale_embedding = 180
-    cfg.eval_repeat_num = 50
-    cfg.repeat_num      = args.repeat_num
-    cfg.num_gpu         = 1
-    cfg.scale_batch_size = 64
-    cfg.save_video            = False
-    cfg.retain_ratio          = 0.4
-    cfg.clustering            = 1
-    cfg.clustering_eps        = 0.05
-    cfg.clustering_minpts     = 0.1667
-    cfg.enable_segmentation   = enable_segmentation
-    cfg.num_queries           = 50
-    cfg.query_inject_layer    = -4
-    cfg.num_object_classes    = 6
-    cfg.unfreeze_dino_last_n  = 4
-    cfg.seg_loss_weight       = 1.0
-    cfg.cls_loss_weight       = 2.0
-    return cfg
-
-
-def init_pipeline_agents(args):
-    """Build the pipeline as separate segmentation and pure GenPose2 agents."""
-    seg_cfg = build_cfg(args, agent_type="score", enable_segmentation=True)
-    print("Building segmentation agent (SegNet path)...")
-    seg_agent = PoseNet(seg_cfg)
-    load_segmentation_agent_checkpoint(seg_agent, args.seg_ckpt_path)
-    seg_agent.net.eval()
-
-    score_cfg = build_cfg(args, agent_type="score", enable_segmentation=False)
-    print("Building pure GenPose2 score agent (no segmentation wrapper)...")
-    score_agent = PoseNet(score_cfg)
-    load_pure_pose_score_checkpoint(
-        score_agent,
-        pose_ckpt_path=args.pose_ckpt_path,
-        fallback_seg_ckpt_path=args.seg_ckpt_path,
-    )
-    score_agent.net.eval()
-
-    energy_agent = None
-    if args.energy_ckpt_path:
-        energy_cfg = build_cfg(args, agent_type="energy", enable_segmentation=False)
-        print("Building pure GenPose2 energy agent...")
-        energy_agent = PoseNet(energy_cfg)
-        load_model_only(energy_agent, args.energy_ckpt_path, "energy")
-        energy_agent.net.eval()
-
-    scale_agent = None
-    if args.scale_ckpt_path:
-        scale_cfg = build_cfg(args, agent_type="scale", enable_segmentation=False)
-        print("Building pure GenPose2 scale agent...")
-        scale_agent = PoseNet(scale_cfg)
-        load_model_only(scale_agent, args.scale_ckpt_path, "scale")
-        scale_agent.net.eval()
-
-    return seg_cfg, score_cfg, seg_agent, score_agent, energy_agent, scale_agent
-
-
 def read_meta(meta_path):
     """Return camera intrinsics in both matrix and object forms."""
     with open(meta_path) as f:
@@ -610,14 +332,13 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
     device = args.device if torch.cuda.is_available() else "cpu"
 
-    # ---- Build separate segmentation and pure GenPose2 agents ----
-    seg_cfg, score_cfg, seg_agent, score_agent, energy_agent, scale_agent = \
-        init_pipeline_agents(args)
+    # ---- Build the single main runtime agent plus optional aux agents ----
+    main_cfg, main_agent, energy_agent, scale_agent = init_pipeline_agents(args)
 
     # ---- Load val/train annotation list ----
     ann_file = os.path.join(args.nuclear_data_path, "annotations", f"{args.split}.json")
     dataset = NuclearWorkpieceDataset(
-        cfg=seg_cfg,
+        cfg=main_cfg,
         data_dir=args.nuclear_data_path,
         annotation_file=ann_file,
         mode="seg",
@@ -649,7 +370,7 @@ def main():
         batch = collate_nuclear([sample])
         batch = process_batch_seg(batch, device)
         with torch.no_grad():
-            class_logits, mask_logits = seg_agent.net(batch, mode="segmentation")
+            class_logits, mask_logits = main_agent.net(batch, mode="segmentation")
         pred_masks, pred_classes, pred_scores = postprocess_seg(
             class_logits[0], mask_logits[0], args.score_threshold)
 
@@ -690,13 +411,13 @@ def main():
                 instances.append(inst_info)
                 continue
 
-            # ---- Pure GenPose2 pose + size inference ----
+            # ---- Main-agent pose + optional aux size inference ----
             try:
                 pose_res = infer_pose_and_size(
-                    score_agent=score_agent,
+                    main_agent=main_agent,
                     energy_agent=energy_agent,
                     scale_agent=scale_agent,
-                    cfg=score_cfg,
+                    cfg=main_cfg,
                     pt_data=pt_data,
                     device=device,
                     repeat_num=args.repeat_num,
