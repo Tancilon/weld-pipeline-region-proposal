@@ -84,8 +84,7 @@ class DINOv2WithQueries(nn.Module):
 
         Returns:
             patch_tokens_for_pose: [bs, num_patches, embed_dim]
-                Patch tokens from before query injection (detached from the
-                query branch to avoid gradient interference with pose).
+                Patch tokens after the full frozen pose tail.
             query_tokens: [bs, num_query_tokens, embed_dim]
                 Query token outputs after joint attention with patches.
             patch_tokens_seg: [bs, num_patches, embed_dim]

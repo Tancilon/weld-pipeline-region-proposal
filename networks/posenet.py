@@ -63,10 +63,6 @@ class GFObjectPose(nn.Module):
                 )
                 # Freeze DINOv2 backbone, optionally unfreeze last N layers
                 raw_dino.requires_grad_(False)
-                unfreeze_n = getattr(cfg, 'unfreeze_dino_last_n', 0)
-                if unfreeze_n > 0:
-                    for block in raw_dino.blocks[-unfreeze_n:]:
-                        block.requires_grad_(True)
                 # Keep reference for non-segmentation code paths
                 self.dino = raw_dino
             else:
