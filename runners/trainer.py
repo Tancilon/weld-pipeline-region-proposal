@@ -230,6 +230,22 @@ def validate_segmentation_pose_init(cfg):
 def freeze_pose_params(agent):
     """Freeze all parameters except the segmentation head/tail modules."""
     net = agent.net.module if isinstance(agent.net, torch.nn.DataParallel) else agent.net
+    missing = []
+    if not hasattr(net, 'eomt_head'):
+        missing.append('eomt_head')
+    dino_wrapper = getattr(net, 'dino_wrapper', None)
+    if dino_wrapper is None:
+        missing.append('dino_wrapper')
+    else:
+        if not hasattr(dino_wrapper, 'query_embed'):
+            missing.append('dino_wrapper.query_embed')
+        if not hasattr(dino_wrapper, 'seg_blocks'):
+            missing.append('dino_wrapper.seg_blocks')
+    if missing:
+        raise RuntimeError(
+            "segmentation training requires dual-tail modules: " + ", ".join(missing)
+        )
+
     for param in net.parameters():
         param.requires_grad = False
 
@@ -290,6 +306,8 @@ def train_segmentation(cfg, train_loader, val_loader, seg_agent):
 def main():
     # load config
     cfg = get_config()
+    if cfg.agent_type == 'segmentation':
+        validate_segmentation_pose_init(cfg)
     
     ''' Init data loader '''
     if getattr(cfg, 'dataset_type', 'omni6dpose') == 'nuclear':
@@ -354,7 +372,6 @@ def main():
 
     elif cfg.agent_type == 'segmentation':
         cfg.enable_segmentation = True
-        validate_segmentation_pose_init(cfg)
         seg_agent = PoseNet(cfg)
         seg_agent.load_ckpt(
             model_dir=cfg.pretrained_score_model_path,
@@ -396,4 +413,3 @@ def main():
         train_scale(cfg, train_loader, val_loader, test_loader, tr_agent, score_agent)
 if __name__ == '__main__':
     main()
-

@@ -268,7 +268,7 @@ def main():
     cfg.device = args.device if torch.cuda.is_available() else "cpu"
     cfg.dino = "pointwise"
     cfg.pts_encoder = "pointnet2"
-    cfg.agent_type = "score"
+    cfg.agent_type = "segmentation"
     cfg.pose_mode = "rot_matrix"
     cfg.regression_head = "Rx_Ry_and_T"
     cfg.sde_mode = "ve"

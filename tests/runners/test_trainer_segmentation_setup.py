@@ -40,111 +40,103 @@ class FakeAgent:
         self.cfg = SimpleNamespace(unfreeze_dino_last_n=99)
 
 
-def _install_optional_module_stubs():
-    def _install_module(name, **attrs):
-        module = types.ModuleType(name)
-        for key, value in attrs.items():
-            setattr(module, key, value)
-        sys.modules[name] = module
-        return module
-
-    def _install_package(name):
-        module = types.ModuleType(name)
+def _install_module(monkeypatch, name, package=False, **attrs):
+    module = types.ModuleType(name)
+    if package:
         module.__path__ = []
-        sys.modules[name] = module
-        return module
+    for key, value in attrs.items():
+        setattr(module, key, value)
+    monkeypatch.setitem(sys.modules, name, module)
+    return module
 
-    if "cv2" not in sys.modules:
-        cv2 = types.ModuleType("cv2")
-        cv2.INTER_LINEAR = 1
-        cv2.RETR_EXTERNAL = 0
-        cv2.CHAIN_APPROX_SIMPLE = 0
-        cv2.COLOR_BGR2RGB = 0
-        cv2.COLOR_RGB2BGR = 0
-        cv2.imread = lambda *args, **kwargs: None
-        cv2.imwrite = lambda *args, **kwargs: True
-        cv2.cvtColor = lambda img, code: img
-        cv2.resize = lambda img, size, interpolation=None: img
-        cv2.addWeighted = lambda src1, alpha, src2, beta, gamma: src1
-        cv2.findContours = lambda *args, **kwargs: ([], None)
-        cv2.drawContours = lambda *args, **kwargs: None
-        cv2.moments = lambda *args, **kwargs: {"m00": 0, "m10": 0, "m01": 0}
-        sys.modules["cv2"] = cv2
 
-    if "ipdb" not in sys.modules:
-        ipdb = types.ModuleType("ipdb")
-        ipdb.set_trace = lambda *args, **kwargs: None
-        sys.modules["ipdb"] = ipdb
+@pytest.fixture
+def trainer_module(monkeypatch):
+    original_argv0 = sys.argv[0]
+    monkeypatch.setattr(sys, "argv", [original_argv0])
+    monkeypatch.delitem(sys.modules, "runners.trainer", raising=False)
 
-    if "tensorboardX" not in sys.modules:
-        tensorboardx = types.ModuleType("tensorboardX")
+    cv2 = _install_module(monkeypatch, "cv2")
+    cv2.INTER_LINEAR = 1
+    cv2.RETR_EXTERNAL = 0
+    cv2.CHAIN_APPROX_SIMPLE = 0
+    cv2.COLOR_BGR2RGB = 0
+    cv2.COLOR_RGB2BGR = 0
+    cv2.imread = lambda *args, **kwargs: None
+    cv2.imwrite = lambda *args, **kwargs: True
+    cv2.cvtColor = lambda img, code: img
+    cv2.resize = lambda img, size, interpolation=None: img
+    cv2.addWeighted = lambda src1, alpha, src2, beta, gamma: src1
+    cv2.findContours = lambda *args, **kwargs: ([], None)
+    cv2.drawContours = lambda *args, **kwargs: None
+    cv2.moments = lambda *args, **kwargs: {"m00": 0, "m10": 0, "m01": 0}
 
-        class SummaryWriter:
-            def __init__(self, *args, **kwargs):
-                pass
+    ipdb = _install_module(monkeypatch, "ipdb")
+    ipdb.set_trace = lambda *args, **kwargs: None
 
-            def add_scalar(self, *args, **kwargs):
-                pass
+    tensorboardx = _install_module(monkeypatch, "tensorboardX")
 
-            def close(self):
-                pass
+    class SummaryWriter:
+        def __init__(self, *args, **kwargs):
+            pass
 
-        tensorboardx.SummaryWriter = SummaryWriter
-        sys.modules["tensorboardX"] = tensorboardx
+        def add_scalar(self, *args, **kwargs):
+            pass
 
-    if "matplotlib" not in sys.modules:
-        matplotlib = types.ModuleType("matplotlib")
-        pyplot = types.ModuleType("matplotlib.pyplot")
-        matplotlib.rc = lambda *args, **kwargs: None
-        pyplot.figure = lambda *args, **kwargs: None
-        pyplot.imshow = lambda *args, **kwargs: None
-        pyplot.show = lambda *args, **kwargs: None
-        pyplot.savefig = lambda *args, **kwargs: None
-        pyplot.close = lambda *args, **kwargs: None
-        pyplot.subplots = lambda *args, **kwargs: (None, None)
-        pyplot.axis = lambda *args, **kwargs: None
-        matplotlib.pyplot = pyplot
-        sys.modules["matplotlib"] = matplotlib
-        sys.modules["matplotlib.pyplot"] = pyplot
+        def close(self):
+            pass
 
-    if "scipy" not in sys.modules:
-        scipy = types.ModuleType("scipy")
-        spatial = types.ModuleType("scipy.spatial")
-        transform = types.ModuleType("scipy.spatial.transform")
+    tensorboardx.SummaryWriter = SummaryWriter
 
-        class Rotation:
-            @classmethod
-            def from_matrix(cls, *args, **kwargs):
-                return cls()
+    matplotlib = _install_module(monkeypatch, "matplotlib")
+    pyplot = _install_module(monkeypatch, "matplotlib.pyplot")
+    matplotlib.rc = lambda *args, **kwargs: None
+    pyplot.figure = lambda *args, **kwargs: None
+    pyplot.imshow = lambda *args, **kwargs: None
+    pyplot.show = lambda *args, **kwargs: None
+    pyplot.savefig = lambda *args, **kwargs: None
+    pyplot.close = lambda *args, **kwargs: None
+    pyplot.subplots = lambda *args, **kwargs: (None, None)
+    pyplot.axis = lambda *args, **kwargs: None
+    matplotlib.pyplot = pyplot
 
-            def as_matrix(self):
-                return None
+    scipy = _install_module(monkeypatch, "scipy")
+    spatial = _install_module(monkeypatch, "scipy.spatial")
+    transform = _install_module(monkeypatch, "scipy.spatial.transform")
 
-        transform.Rotation = Rotation
-        spatial.transform = transform
-        scipy.spatial = spatial
-        sys.modules["scipy"] = scipy
-        sys.modules["scipy.spatial"] = spatial
-        sys.modules["scipy.spatial.transform"] = transform
+    class Rotation:
+        @classmethod
+        def from_matrix(cls, *args, **kwargs):
+            return cls()
 
-    _install_package("datasets")
-    _install_package("networks")
-    _install_package("utils")
-    _install_package("cutoop")
+        def as_matrix(self):
+            return None
+
+    transform.Rotation = Rotation
+    spatial.transform = transform
+    scipy.spatial = spatial
+
+    _install_module(monkeypatch, "datasets", package=True)
+    _install_module(monkeypatch, "networks", package=True)
+    _install_module(monkeypatch, "utils", package=True)
+    _install_module(monkeypatch, "cutoop", package=True)
 
     _install_module(
+        monkeypatch,
         "datasets.datasets_omni6dpose",
         get_data_loaders_from_cfg=lambda *args, **kwargs: None,
         process_batch=lambda *args, **kwargs: None,
         array_to_SymLabel=lambda *args, **kwargs: None,
     )
     _install_module(
+        monkeypatch,
         "datasets.datasets_nuclear",
         get_nuclear_data_loaders=lambda *args, **kwargs: None,
         process_batch_seg=lambda *args, **kwargs: None,
     )
-    _install_module("networks.posenet_agent", PoseNet=type("PoseNet", (), {}))
+    _install_module(monkeypatch, "networks.posenet_agent", PoseNet=type("PoseNet", (), {}))
     _install_module(
+        monkeypatch,
         "utils.misc",
         exists_or_mkdir=lambda *args, **kwargs: None,
         get_pose_representation=lambda *args, **kwargs: None,
@@ -152,37 +144,28 @@ def _install_optional_module_stubs():
         parallel_setup=lambda *args, **kwargs: None,
         parallel_cleanup=lambda *args, **kwargs: None,
     )
-    _install_module("utils.genpose_utils", merge_results=lambda *args, **kwargs: None)
+    _install_module(monkeypatch, "utils.genpose_utils", merge_results=lambda *args, **kwargs: None)
     _install_module(
+        monkeypatch,
         "utils.metrics",
         get_metrics=lambda *args, **kwargs: None,
         get_rot_matrix=lambda *args, **kwargs: None,
     )
-    _install_module("utils.so3_visualize", visualize_so3=lambda *args, **kwargs: None)
-    _install_module("utils.visualize", create_grid_image=lambda *args, **kwargs: None)
-    _install_module("utils.transforms")
-    _install_module("cutoop.utils", draw_3d_bbox=lambda *args, **kwargs: None)
-    _install_module("cutoop.transform")
-    _install_module("cutoop.data_types")
-    _install_module("cutoop.eval_utils")
+    _install_module(monkeypatch, "utils.so3_visualize", visualize_so3=lambda *args, **kwargs: None)
+    _install_module(monkeypatch, "utils.visualize", create_grid_image=lambda *args, **kwargs: None)
+    _install_module(monkeypatch, "utils.transforms")
+    _install_module(monkeypatch, "cutoop.utils", draw_3d_bbox=lambda *args, **kwargs: None)
+    _install_module(monkeypatch, "cutoop.transform")
+    _install_module(monkeypatch, "cutoop.data_types")
+    _install_module(monkeypatch, "cutoop.eval_utils")
+
+    return importlib.import_module("runners.trainer")
 
 
-def import_trainer():
-    original_argv = sys.argv[:]
-    sys.argv = [original_argv[0]]
-    try:
-        _install_optional_module_stubs()
-        sys.modules.pop("runners.trainer", None)
-        return importlib.import_module("runners.trainer")
-    finally:
-        sys.argv = original_argv
-
-
-def test_freeze_pose_params_only_keeps_segmentation_modules_trainable():
-    trainer = import_trainer()
+def test_freeze_pose_params_only_keeps_segmentation_modules_trainable(trainer_module):
     agent = FakeAgent()
 
-    trainer.freeze_pose_params(agent)
+    trainer_module.freeze_pose_params(agent)
 
     trainable = {name for name, param in agent.net.named_parameters() if param.requires_grad}
 
@@ -202,9 +185,30 @@ def test_freeze_pose_params_only_keeps_segmentation_modules_trainable():
 
 
 @pytest.mark.parametrize("value", [None, ""])
-def test_validate_segmentation_pose_init_rejects_falsy_checkpoint(value):
-    trainer = import_trainer()
+def test_validate_segmentation_pose_init_rejects_falsy_checkpoint(trainer_module, value):
     cfg = SimpleNamespace(agent_type="segmentation", pretrained_score_model_path=value)
 
     with pytest.raises(ValueError, match="pretrained_score_model_path"):
-        trainer.validate_segmentation_pose_init(cfg)
+        trainer_module.validate_segmentation_pose_init(cfg)
+
+
+def test_validate_segmentation_pose_init_accepts_checkpoint(trainer_module):
+    cfg = SimpleNamespace(
+        agent_type="segmentation",
+        pretrained_score_model_path="/tmp/pose-init.pth",
+    )
+
+    assert trainer_module.validate_segmentation_pose_init(cfg) == "/tmp/pose-init.pth"
+
+
+def test_freeze_pose_params_raises_when_required_segmentation_modules_missing(trainer_module):
+    class IncompleteSegNet(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.dino_wrapper = nn.Module()
+            self.dino_wrapper.query_embed = nn.Embedding(3, 4)
+
+    agent = SimpleNamespace(net=IncompleteSegNet())
+
+    with pytest.raises(RuntimeError, match="eomt_head|dino_wrapper.seg_blocks"):
+        trainer_module.freeze_pose_params(agent)
