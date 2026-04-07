@@ -2,11 +2,13 @@
 DINOv2 wrapper with learnable query token injection for EoMT-style segmentation.
 
 Based on "Your ViT is Secretly an Image Segmentation Model" (CVPR 2025).
-Injects learnable query tokens into the last N transformer blocks of a frozen
-DINOv2 backbone, enabling instance segmentation and classification without
-a separate decoder.
+The backbone is split at `inject_layer` into a frozen pose tail from the
+original DINO model and a deep-copied segmentation tail that receives query
+tokens. Pose features are taken from the original frozen tail, while
+segmentation uses the cloned tail only.
 """
 
+import copy
 import torch
 import torch.nn as nn
 
@@ -47,6 +49,12 @@ class DINOv2WithQueries(nn.Module):
         self.query_embed = nn.Embedding(num_query_tokens, self.embed_dim)
         nn.init.trunc_normal_(self.query_embed.weight, std=0.02)
 
+        self.seg_blocks = copy.deepcopy(self.dino.blocks[self.inject_layer:])
+        if hasattr(self.dino, 'norm') and self.dino.norm is not None:
+            self.seg_norm = copy.deepcopy(self.dino.norm)
+        else:
+            self.seg_norm = None
+
     def _prepare_tokens(self, x):
         """Run DINOv2 patch embedding + CLS token + positional embedding.
 
@@ -83,34 +91,34 @@ class DINOv2WithQueries(nn.Module):
             patch_tokens_seg: [bs, num_patches, embed_dim]
                 Patch tokens after joint attention (for mask dot-product).
         """
+        # Prepare token sequence: [CLS, (registers), patches]
+        tokens = self._prepare_tokens(x)  # [B, N_total, D]
+        num_prefix = self._count_prefix_tokens()
         bs = x.shape[0]
 
-        # Prepare token sequence: [CLS, (registers), patches]
-        tokens = self._prepare_tokens(x) # [B, N_total, D]
-        num_prefix = self._count_prefix_tokens()
-
-        # Stage 1: run first layers (before injection) with patch tokens only
+        # Shared stem: run layers before the injection point once.
         for blk in self.dino.blocks[:self.inject_layer]:
             tokens = blk(tokens)
 
-        # Extract patch tokens for the pose branch (isolate from query gradients)
-        patch_tokens_for_pose = tokens[:, num_prefix:, :].detach().clone()
-
-        # Stage 2: inject query tokens and run remaining layers
-        query_tokens = self.query_embed.weight.unsqueeze(0).expand(bs, -1, -1)
-        # Concatenate: [CLS, (registers), patches, queries]
-        tokens = torch.cat([tokens, query_tokens], dim=1)
-
+        # Pose branch: run the original frozen DINO tail without query tokens.
+        pose_tokens = tokens
         for blk in self.dino.blocks[self.inject_layer:]:
-            tokens = blk(tokens)
-
-        # Apply final norm if present
+            pose_tokens = blk(pose_tokens)
         if hasattr(self.dino, 'norm') and self.dino.norm is not None:
-            tokens = self.dino.norm(tokens)
+            pose_tokens = self.dino.norm(pose_tokens)
+        patch_tokens_for_pose = pose_tokens[:, num_prefix:, :].detach().clone()
+
+        # Segmentation branch: inject queries into the cloned tail only.
+        query_tokens = self.query_embed.weight.unsqueeze(0).expand(bs, -1, -1)
+        tokens = torch.cat([tokens, query_tokens], dim=1)
+        for blk in self.seg_blocks:
+            tokens = blk(tokens)
+        if self.seg_norm is not None:
+            tokens = self.seg_norm(tokens)
 
         # Separate outputs
         num_queries = self.num_query_tokens
-        query_out = tokens[:, -num_queries:, :]        # [bs, N, embed_dim]
+        query_out = tokens[:, -num_queries:, :]           # [bs, N, embed_dim]
         patch_out = tokens[:, num_prefix:-num_queries, :]  # [bs, num_patches, embed_dim]
 
         return patch_tokens_for_pose, query_out, patch_out
@@ -123,4 +131,3 @@ class DINOv2WithQueries(nn.Module):
         dino.get_intermediate_layers(x)[0]).
         """
         return self.dino.get_intermediate_layers(x)[0] # [B, N_patch, D]， D = 384 for ViT-S
-

@@ -134,9 +134,9 @@ class GFObjectPose(nn.Module):
 
             if self.enable_segmentation:
                 # Use wrapper: get pose-branch patch tokens + cache seg tokens
-                patch_for_pose, query_out, patch_after_query = \
+                pose_patch_tokens, query_out, patch_after_query = \
                     self.dino_wrapper.forward_with_queries(roi_rgb)
-                feat = patch_for_pose  # [bs, 256, 384] detached from query branch
+                feat = pose_patch_tokens  # [bs, 256, 384] detached from query branch
                 data['_query_tokens'] = query_out
                 data['_patch_tokens_seg'] = patch_after_query
             else:
@@ -266,7 +266,7 @@ class GFObjectPose(nn.Module):
             # Run DINOv2 with queries if not already cached
             if '_query_tokens' not in data:
                 roi_rgb = data['roi_rgb']
-                patch_for_pose, query_out, patch_after_query = \
+                pose_patch_tokens, query_out, patch_after_query = \
                     self.dino_wrapper.forward_with_queries(roi_rgb)
                 data['_query_tokens'] = query_out
                 data['_patch_tokens_seg'] = patch_after_query
@@ -300,4 +300,3 @@ def test():
     print(net_parameters_num['Total'], net_parameters_num['Trainable'])
 if __name__ == '__main__':
     test()
-
