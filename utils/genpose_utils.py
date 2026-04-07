@@ -4,6 +4,7 @@ import numpy as np
 
 from ipdb import set_trace
 
+# 为网络补充了目标相对于相机的绝对视角/方位信息，尤其能帮助 translation 回归，并为 rotation 回归提供有用的几何先验
 def encode_axes(axes: torch.Tensor, dim: int) -> torch.Tensor:
     ''' axes: Bx... '''
     bs = axes.shape[0]

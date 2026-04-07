@@ -31,6 +31,7 @@ from utils.datasets_utils import crop_resize_by_warp_affine, get_2d_coord_np
 CLASS_NAMES = ['盖板', '方管', '喇叭口', 'H型钢', '槽钢', '坡口']
 CLASS_TO_IDX = {name: i for i, name in enumerate(CLASS_NAMES)}
 NUM_CLASSES = len(CLASS_NAMES)
+MAX_DEPTH_METERS = 4.0
 
 
 # ---------------------------------------------------------------------------
@@ -163,8 +164,32 @@ class NuclearWorkpieceDataset(data.Dataset):
             if os.path.exists(depth_path):
                 depth = cv2.imread(depth_path, cv2.IMREAD_ANYCOLOR | cv2.IMREAD_ANYDEPTH)
                 if depth is not None:
+                    depth = depth.astype(np.float32, copy=False)
                     if len(depth.shape) == 3:
+                        valid_ch0 = np.isfinite(depth[:, :, 0]) & (depth[:, :, 0] > 0)
+                        bad_channels = []
+                        for ch in range(1, depth.shape[2]):
+                            valid_ch = np.isfinite(depth[:, :, ch]) & (depth[:, :, ch] > 0)
+                            if np.any(valid_ch & ~valid_ch0):
+                                bad_channels.append(ch)
+                        if bad_channels:
+                            raise ValueError(
+                                f"Depth file {depth_path} contains valid depth values outside channel 0 "
+                                f"(channels {bad_channels}); unsupported EXR layout."
+                            )
                         depth = depth[:, :, 0]
+                    elif len(depth.shape) != 2:
+                        raise ValueError(
+                            f"Depth file {depth_path} has unsupported shape {depth.shape}; expected [H, W] or [H, W, C]."
+                        )
+
+                    invalid_depth = ~np.isfinite(depth)
+                    invalid_depth |= depth < 0
+                    invalid_depth |= depth > MAX_DEPTH_METERS
+                    if np.any(invalid_depth):
+                        depth = depth.copy()
+                        depth[invalid_depth] = 0
+
                     depth_resized = cv2.resize(depth, (self.img_size, self.img_size),
                                                interpolation=cv2.INTER_NEAREST)
                     data_dict['depth'] = torch.as_tensor(depth_resized, dtype=torch.float32)

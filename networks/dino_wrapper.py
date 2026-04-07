@@ -43,6 +43,7 @@ class DINOv2WithQueries(nn.Module):
         self.inject_layer = query_inject_layer
 
         # Learnable query embeddings
+        # shape: [num_query_tokens, embed_dim]
         self.query_embed = nn.Embedding(num_query_tokens, self.embed_dim)
         nn.init.trunc_normal_(self.query_embed.weight, std=0.02)
 
@@ -64,7 +65,7 @@ class DINOv2WithQueries(nn.Module):
         """Count number of non-patch prefix tokens (CLS + registers)."""
         n = 1  # CLS token is always present
         if hasattr(self.dino, 'register_tokens') and self.dino.register_tokens is not None:
-            n += self.dino.register_tokens.shape[1]
+            n += self.dino.register_tokens.shape[1] # register token shape: [1, num_registers, embed_dim]
         return n
 
     def forward_with_queries(self, x):
@@ -85,7 +86,7 @@ class DINOv2WithQueries(nn.Module):
         bs = x.shape[0]
 
         # Prepare token sequence: [CLS, (registers), patches]
-        tokens = self._prepare_tokens(x)
+        tokens = self._prepare_tokens(x) # [B, N_total, D]
         num_prefix = self._count_prefix_tokens()
 
         # Stage 1: run first layers (before injection) with patch tokens only
@@ -114,11 +115,12 @@ class DINOv2WithQueries(nn.Module):
 
         return patch_tokens_for_pose, query_out, patch_out
 
-    def forward_patch_only(self, x):
+    def forward_patch_only(self, x): # [B, 3, H, W]
         """Standard DINOv2 forward without query injection.
 
         Used when segmentation is disabled or for compatibility.
         Returns patch tokens from the last intermediate layer (same as
         dino.get_intermediate_layers(x)[0]).
         """
-        return self.dino.get_intermediate_layers(x)[0]
+        return self.dino.get_intermediate_layers(x)[0] # [B, N_patch, D]， D = 384 for ViT-S
+

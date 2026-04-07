@@ -240,7 +240,7 @@ class Omni6DPoseDataSet(data.Dataset):
         roi_rgb_ = crop_resize_by_warp_affine(
             rgb, bbox_center, scale, self.img_size, interpolation=cv2.INTER_LINEAR
         )
-        roi_rgb = Omni6DPoseDataSet.rgb_transform(roi_rgb_)
+        roi_rgb = Omni6DPoseDataSet.rgb_transform(roi_rgb_) #  normalization raw roi_rgb 
         mask_target = mask.copy().astype(np.float32)
         mask_target[mask != obj.mask_id] = 0.0
         mask_target[mask == obj.mask_id] = 1.0
@@ -304,7 +304,7 @@ class Omni6DPoseDataSet(data.Dataset):
         data_dict['roi_center_dir'] = torch.as_tensor(pixel2xyz(im_H, im_W, bbox_center, intrinsics), dtype=torch.float32).contiguous()
         intrinsics_list = [intrinsics.fx, intrinsics.fy, intrinsics.cx, intrinsics.cy, intrinsics.width, intrinsics.height]
         data_dict['intrinsics'] = torch.as_tensor(intrinsics_list, dtype=torch.float32).contiguous()
-        data_dict['bbox_side_len'] = torch.as_tensor(np.array(obj.meta.bbox_side_len), dtype=torch.float32).contiguous()
+        data_dict['bbox_side_len'] = torch.as_tensor(np.array(obj.meta.bbox_side_len), dtype=torch.float32).contiguous() # gt scale: [length_x, length_y, length_z] for scalenet training
         data_dict['pose'] = torch.as_tensor(obj.quaternion_wxyz + obj.translation, dtype=torch.float32).contiguous()
         data_dict['path'] = img_path
         data_dict['class_label'] = cat_id
@@ -382,7 +382,7 @@ class Omni6DPoseDataSet(data.Dataset):
     @staticmethod
     def rgb_transform(rgb):
         rgb_ = np.transpose(rgb, (2, 0, 1)) / 255
-        _mean = (0.485, 0.456, 0.406)
+        _mean = (0.485, 0.456, 0.406) # ImageNet  canonical
         _std = (0.229, 0.224, 0.225)
         for i in range(3):
             rgb_[i, :, :] = (rgb_[i, :, :] - _mean[i]) / _std[i]

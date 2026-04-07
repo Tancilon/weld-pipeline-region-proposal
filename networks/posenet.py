@@ -34,17 +34,18 @@ class GFObjectPose(nn.Module):
         
         ''' Load model, define SDE '''
         # init SDE config
-        self.prior_fn = prior_fn
-        self.marginal_prob_fn = marginal_prob_fn
+        self.prior_fn = prior_fn # 先验采样函数, 推理采样开始时，要先从噪声分布里采一个初始姿态
+        self.marginal_prob_fn = marginal_prob_fn # 前向加噪分布函数, 训练时会把 GT pose 在时间 t 上加噪，这个函数定义“加完噪后分布长什么样”
         self.sde_fn = sde_fn
-        self.sampling_eps = sampling_eps
-        self.T = T
+        self.sampling_eps = sampling_eps  # 反向采样时的最小时间下界, 一般不会真的积分到 t=0，而是到一个很小的 eps，避免数值不稳定
+        self.T = T # 反向采样的起点时间，通常从 t=T 走到 t=sampling_eps
         # self.prior_fn, self.marginal_prob_fn, self.sde_fn, self.sampling_eps = init_sde(cfg.sde_mode)
         
         ''' dino v2 '''
         self.enable_segmentation = getattr(cfg, 'enable_segmentation', False)
         if cfg.dino != 'none':
-            raw_dino = torch.hub.load('facebookresearch/dinov2', GFObjectPose.dino_name).to(cfg.device)
+            # raw_dino type: DINO v2 instance (torch.nn.Module)
+            raw_dino = torch.hub.load('facebookresearch/dinov2', GFObjectPose.dino_name).to(cfg.device) 
             self.dino_dim = GFObjectPose.dino_dim
             self.embedding_dim = GFObjectPose.embedding_dim
 

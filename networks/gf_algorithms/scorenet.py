@@ -52,14 +52,14 @@ class Linear(torch.nn.Module):
         return x
 
 
-class GaussianFourierProjection(nn.Module):
+class GaussianFourierProjection(nn.Module): # 用一组固定随机频率，把标量时间步 t 映射成高维 sin/cos 特征，让扩散网络更容易建模“不同时间步对应不同噪声水平”的关系
     """Gaussian random features for encoding time steps."""
     def __init__(self, embed_dim, scale=30.):
         super().__init__()
         # Randomly sample weights during initialization. These weights are fixed
         # during optimization and are not trainable.
         self.W = nn.Parameter(torch.randn(embed_dim // 2) * scale, requires_grad=False)
-    def forward(self, x):
+    def forward(self, x): # batch 内每个样本的时间步：shape (B,)
         x_proj = x[:, None] * self.W[None, :] * 2 * np.pi
         return torch.cat([torch.sin(x_proj), torch.cos(x_proj)], dim=-1)
 
@@ -110,7 +110,7 @@ class PoseScoreNet(nn.Module):
         
         ''' encode t '''
         self.t_encoder = nn.Sequential(
-            GaussianFourierProjection(embed_dim=128),
+            GaussianFourierProjection(embed_dim=128), # （batch_size, 128)
             # self.act, # M4D26 update
             nn.Linear(128, 128),
             self.act,
