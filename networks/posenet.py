@@ -259,11 +259,10 @@ class GFObjectPose(nn.Module):
             # return torch.concat([self.dino(rgb), positional_embedding], dim=-1)
         elif mode == 'segmentation':
             assert self.enable_segmentation, "enable_segmentation must be True"
-            # Run DINOv2 with queries if not already cached
+            # Run the segmentation-only wrapper path if not already cached.
             if '_query_tokens' not in data:
                 roi_rgb = data['roi_rgb']
-                pose_patch_tokens, query_out, patch_after_query = \
-                    self.dino_wrapper.forward_with_queries(roi_rgb)
+                query_out, patch_after_query = self.dino_wrapper.forward_segmentation(roi_rgb)
                 data['_query_tokens'] = query_out
                 data['_patch_tokens_seg'] = patch_after_query
             img_size = (self.cfg.img_size, self.cfg.img_size)
