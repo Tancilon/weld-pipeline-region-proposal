@@ -1,15 +1,5 @@
 import argparse
 
-import numpy as np
-import torch
-from sklearn.cluster import DBSCAN
-
-from networks.reward import sort_poses_by_energy
-from utils.misc import average_quaternion_batch
-from utils.metrics import get_rot_matrix
-from utils.transforms import matrix_to_quaternion, quaternion_to_matrix
-
-
 REQUIRED_SINGLE_AGENT_EXACT_KEYS = (
     "dino_wrapper.query_embed.weight",
     "eomt_head.class_head.weight",
@@ -73,6 +63,44 @@ def get_posenet_class():
     return PoseNet
 
 
+def get_dbscan_class():
+    try:
+        from sklearn.cluster import DBSCAN
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError(
+            "DBSCAN clustering requires scikit-learn at runtime. "
+            "Install 'sklearn' or disable clustering before pose aggregation."
+        ) from exc
+    return DBSCAN
+
+
+def get_torch_module():
+    import torch
+
+    return torch
+
+
+def get_numpy_module():
+    import numpy as np
+
+    return np
+
+
+def get_pose_runtime_deps():
+    from networks.reward import sort_poses_by_energy
+    from utils.misc import average_quaternion_batch
+    from utils.metrics import get_rot_matrix
+    from utils.transforms import matrix_to_quaternion, quaternion_to_matrix
+
+    return (
+        sort_poses_by_energy,
+        average_quaternion_batch,
+        get_rot_matrix,
+        matrix_to_quaternion,
+        quaternion_to_matrix,
+    )
+
+
 def validate_single_agent_seg_state_dict(state_dict):
     if not isinstance(state_dict, dict):
         raise ValueError("Checkpoint model_state_dict must be a dict.")
@@ -107,6 +135,7 @@ def _load_model_state_dict(checkpoint, ckpt_path):
 
 
 def load_main_agent_checkpoint(agent, seg_ckpt_path):
+    torch = get_torch_module()
     print(f"Loading single-agent seg checkpoint: {seg_ckpt_path}")
     checkpoint = torch.load(seg_ckpt_path, map_location="cpu")
     state_dict = validate_single_agent_seg_state_dict(
@@ -122,6 +151,7 @@ def load_main_agent_checkpoint(agent, seg_ckpt_path):
 
 
 def load_model_only(agent, ckpt_path, name):
+    torch = get_torch_module()
     print(f"Loading {name} checkpoint: {ckpt_path}")
     checkpoint = torch.load(ckpt_path, map_location="cpu")
     state_dict = _load_model_state_dict(checkpoint, ckpt_path)
@@ -134,6 +164,8 @@ def load_model_only(agent, ckpt_path, name):
 
 
 def build_cfg(args, agent_type="score", enable_segmentation=False):
+    torch = get_torch_module()
+
     class Cfg:
         pass
 
@@ -226,6 +258,16 @@ def build_instance_batch(pt_data, device):
 
 
 def aggregate_pose(cfg, pred_pose, pred_energy=None):
+    torch = get_torch_module()
+    np = get_numpy_module()
+    (
+        sort_poses_by_energy,
+        average_quaternion_batch,
+        get_rot_matrix,
+        matrix_to_quaternion,
+        quaternion_to_matrix,
+    ) = get_pose_runtime_deps()
+
     bs, repeat_num, _ = pred_pose.shape
     if pred_energy is None:
         good_pose = pred_pose
@@ -243,6 +285,7 @@ def aggregate_pose(cfg, pred_pose, pred_energy=None):
     aggregated_quat_wxyz = average_quaternion_batch(quat_wxyz)
 
     if getattr(cfg, "clustering", 0):
+        DBSCAN = get_dbscan_class()
         min_samples = max(1, int(round(cfg.clustering_minpts * retain_num)))
         for batch_idx in range(bs):
             pairwise_distance = 1 - torch.sum(
@@ -271,6 +314,7 @@ def aggregate_pose(cfg, pred_pose, pred_energy=None):
 
 
 def estimate_size_from_geometry(points, pose):
+    torch = get_torch_module()
     rotation = pose[:, :3, :3]
     translation = pose[:, :3, 3]
     obj_points = points - translation.unsqueeze(1)

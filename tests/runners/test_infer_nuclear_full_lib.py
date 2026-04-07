@@ -22,8 +22,7 @@ def _install_module(monkeypatch, name, package=False, **attrs):
     return module
 
 
-@pytest.fixture
-def runtime_lib(monkeypatch):
+def _install_runtime_deps(monkeypatch, include_sklearn=True):
     monkeypatch.delitem(sys.modules, "runners.infer_nuclear_full_lib", raising=False)
 
     cv2 = _install_module(monkeypatch, "cv2")
@@ -46,7 +45,8 @@ def runtime_lib(monkeypatch):
     _install_module(monkeypatch, "networks", package=True)
     _install_module(monkeypatch, "utils", package=True)
     _install_module(monkeypatch, "cutoop", package=True)
-    _install_module(monkeypatch, "sklearn", package=True)
+    if include_sklearn:
+        _install_module(monkeypatch, "sklearn", package=True)
 
     class Omni6DPoseDataSet:
         @staticmethod
@@ -118,17 +118,39 @@ def runtime_lib(monkeypatch):
         quaternion_to_matrix=lambda quat: torch.eye(3).repeat(quat.shape[0], 1, 1),
     )
 
-    class FakeDBSCAN:
-        def __init__(self, *args, **kwargs):
-            pass
+    if include_sklearn:
+        class FakeDBSCAN:
+            def __init__(self, *args, **kwargs):
+                pass
 
-        def fit(self, x):
-            self.labels_ = [-1] * len(x)
-            return self
+            def fit(self, x):
+                self.labels_ = [-1] * len(x)
+                return self
 
-    _install_module(monkeypatch, "sklearn.cluster", DBSCAN=FakeDBSCAN)
+        _install_module(monkeypatch, "sklearn.cluster", DBSCAN=FakeDBSCAN)
+
+
+@pytest.fixture
+def runtime_lib(monkeypatch):
+    _install_runtime_deps(monkeypatch)
 
     return importlib.import_module("runners.infer_nuclear_full_lib")
+
+
+def test_runtime_lib_import_and_parser_work_without_runtime_dependencies(monkeypatch):
+    monkeypatch.delitem(sys.modules, "runners.infer_nuclear_full_lib", raising=False)
+    monkeypatch.delitem(sys.modules, "sklearn.cluster", raising=False)
+    monkeypatch.delitem(sys.modules, "sklearn", raising=False)
+    monkeypatch.delitem(sys.modules, "networks.reward", raising=False)
+    monkeypatch.delitem(sys.modules, "utils.misc", raising=False)
+    monkeypatch.delitem(sys.modules, "utils.metrics", raising=False)
+    monkeypatch.delitem(sys.modules, "utils.transforms", raising=False)
+
+    module = importlib.import_module("runners.infer_nuclear_full_lib")
+
+    parser = module.build_arg_parser()
+    args = parser.parse_args(["--nuclear_data_path", "/tmp/data", "--seg_ckpt", "/tmp/seg.pth"])
+    assert args.seg_ckpt == "/tmp/seg.pth"
 
 
 def test_build_arg_parser_has_no_pose_checkpoint_argument(runtime_lib):
