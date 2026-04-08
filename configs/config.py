@@ -50,6 +50,17 @@ def get_config():
                         help='weight for segmentation mask loss')
     parser.add_argument('--cls_loss_weight', type=float, default=2.0,
                         help='weight for classification loss')
+    parser.add_argument('--auto_class_weight', dest='auto_class_weight', action='store_true',
+                        help='automatically compute class weights from nuclear train annotations')
+    parser.add_argument('--no_auto_class_weight', dest='auto_class_weight', action='store_false',
+                        help='disable automatic class-weight computation')
+    parser.set_defaults(auto_class_weight=True)
+    parser.add_argument('--class_weight_power', type=float, default=0.5,
+                        help='inverse-frequency smoothing power for class-weight generation')
+    parser.add_argument('--class_weight_min', type=float, default=0.25,
+                        help='minimum clipped class weight for positive-count classes')
+    parser.add_argument('--class_weight_max', type=float, default=4.0,
+                        help='maximum clipped class weight for positive-count classes')
     parser.add_argument('--unfreeze_dino_last_n', type=int, default=0,
                         help='legacy knob from the old single-tail segmentation flow; ignored by the dual-tail segmentation design')
     parser.add_argument('--dataset_type', type=str, default='omni6dpose',

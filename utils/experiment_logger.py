@@ -22,10 +22,33 @@ class WandbLogger:
     def __init__(self, run, wandb_module):
         self._run = run
         self._wandb = wandb_module
+        self._pending_step = None
+        self._pending_payload = {}
+
+    def _flush_pending(self):
+        if not self._pending_payload:
+            return
+        self._run.log(self._pending_payload, step=self._pending_step, commit=True)
+        self._pending_step = None
+        self._pending_payload = {}
+
+    def _log_payload(self, payload, global_step):
+        if global_step is None:
+            self._flush_pending()
+            self._run.log(payload, step=None, commit=True)
+            return
+
+        if self._pending_step is None:
+            self._pending_step = global_step
+        elif global_step != self._pending_step:
+            self._flush_pending()
+            self._pending_step = global_step
+
+        self._pending_payload.update(payload)
 
     def add_scalar(self, tag, scalar_value, global_step=None, *args, **kwargs):
         payload = {tag: scalar_value}
-        self._run.log(payload, step=global_step, commit=True)
+        self._log_payload(payload, global_step)
 
     def add_scalars(self, main_tag, tag_scalar_dict, global_step=None, *args, **kwargs):
         payload = {}
@@ -34,16 +57,13 @@ class WandbLogger:
                 payload[f"{main_tag}/{tag}"] = value
             else:
                 payload[tag] = value
-        self._run.log(payload, step=global_step, commit=True)
+        self._log_payload(payload, global_step)
 
     def add_image(self, tag, img_tensor, global_step=None, *args, **kwargs):
-        self._run.log(
-            {tag: self._wandb.Image(img_tensor)},
-            step=global_step,
-            commit=True,
-        )
+        self._log_payload({tag: self._wandb.Image(img_tensor)}, global_step)
 
     def finish(self):
+        self._flush_pending()
         if hasattr(self._run, "finish"):
             self._run.finish()
 

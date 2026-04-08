@@ -142,11 +142,42 @@ def test_logger_surface_delegates_to_wandb_run(monkeypatch, tmp_path):
     logger.finish()
 
     run = calls["run"]
-    image_payload = run.logged[2][0]["train/image"]
+    image_payload = run.logged[0][0]["train/image"]
     assert run.logged == [
-        ({"train/loss": 1.25}, 7, True),
-        ({"train/loss": 1.25, "train/acc": 0.9}, 7, True),
-        ({"train/image": image_payload}, 7, True),
+        (
+            {
+                "train/loss": 1.25,
+                "train/acc": 0.9,
+                "train/image": image_payload,
+            },
+            7,
+            True,
+        ),
     ]
     assert image_payload.value == "fake-image"
     assert run.finished is True
+
+
+def test_logger_flushes_buffer_when_step_changes(monkeypatch, tmp_path):
+    calls = _install_fake_wandb(monkeypatch)
+
+    from utils.experiment_logger import build_experiment_logger
+
+    cfg = Namespace(
+        wandb_mode="online",
+        wandb_project="demo-project",
+        wandb_entity="demo-entity",
+        wandb_run_name="demo-run",
+    )
+
+    logger = build_experiment_logger(cfg, tmp_path)
+    logger.add_scalar("train/loss", 1.0, 7)
+    logger.add_scalar("train/lr", 0.1, 7)
+    logger.add_scalar("train/loss", 0.5, 8)
+    logger.finish()
+
+    run = calls["run"]
+    assert run.logged == [
+        ({"train/loss": 1.0, "train/lr": 0.1}, 7, True),
+        ({"train/loss": 0.5}, 8, True),
+    ]

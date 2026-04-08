@@ -80,6 +80,7 @@ class PoseNet(nn.Module):
                 cls_weight=self.cfg.cls_loss_weight,
                 mask_weight=self.cfg.seg_loss_weight * 5.0,
                 dice_weight=self.cfg.seg_loss_weight * 5.0,
+                class_weights=getattr(self.cfg, 'generated_class_weights', None),
             )
          
 

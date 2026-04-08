@@ -174,16 +174,19 @@ class EoMTCriterion(nn.Module):
         dice_weight: Weight for mask Dice loss.
         no_object_weight: CE weight for the no-object class (typically < 1
             to down-weight the abundant no-object predictions).
+        class_weights: Optional foreground CE weights of length num_classes.
+            When provided, indices [0:num_classes] use these values.
     """
 
     def __init__(self, num_classes=6, cls_weight=2.0, mask_weight=5.0,
-                 dice_weight=5.0, no_object_weight=0.1):
+                 dice_weight=5.0, no_object_weight=0.1, class_weights=None):
         super().__init__()
         self.num_classes = num_classes
         self.cls_weight = cls_weight
         self.mask_weight = mask_weight
         self.dice_weight = dice_weight
         self.no_object_weight = no_object_weight
+        self.class_weights = class_weights
 
         # no-object is the last class index
         self.no_object_class = num_classes
@@ -312,7 +315,19 @@ class EoMTCriterion(nn.Module):
         total_dice = torch.tensor(0.0, device=device)
 
         # CE weight vector: normal for object classes, reduced for no-object
-        ce_weight = torch.ones(self.num_classes + 1, device=device)
+        ce_weight = torch.ones(
+            self.num_classes + 1, device=device, dtype=class_logits.dtype
+        )
+        if self.class_weights is not None:
+            fg_weights = torch.as_tensor(
+                self.class_weights, device=device, dtype=ce_weight.dtype
+            ).flatten()
+            if fg_weights.numel() != self.num_classes:
+                raise ValueError(
+                    f"class_weights must have length {self.num_classes}, "
+                    f"got {fg_weights.numel()}"
+                )
+            ce_weight[:self.num_classes] = fg_weights
         ce_weight[self.no_object_class] = self.no_object_weight
 
         for b in range(bs):

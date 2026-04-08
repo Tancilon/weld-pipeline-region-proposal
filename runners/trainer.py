@@ -17,12 +17,12 @@ from tqdm import tqdm
 
 # from datasets.datasets_nocs import get_data_loaders_from_cfg, process_batch
 from datasets.datasets_omni6dpose import get_data_loaders_from_cfg, process_batch, array_to_SymLabel
-from datasets.datasets_nuclear import get_nuclear_data_loaders, process_batch_seg
+from datasets.datasets_nuclear import get_nuclear_data_loaders, process_batch_seg, CLASS_NAMES
 from networks.posenet_agent import PoseNet
 from configs.config import get_config
 from utils.misc import exists_or_mkdir, get_pose_representation
 from utils.genpose_utils import merge_results
-from utils.experiment_logger import update_summary_json
+from utils.experiment_logger import update_summary_json, write_config_snapshot
 from utils.misc import average_quaternion_batch, parallel_setup, parallel_cleanup
 from utils.metrics import get_metrics, get_rot_matrix
 from utils.so3_visualize import visualize_so3
@@ -32,6 +32,60 @@ from cutoop.utils import draw_3d_bbox
 from cutoop.transform import *
 from cutoop.data_types import *
 from cutoop.eval_utils import *
+
+
+def collect_nuclear_train_class_counts(nuclear_data_path):
+    """Collect per-class instance counts from nuclear annotations/train.json."""
+    if not nuclear_data_path:
+        raise ValueError("nuclear_data_path is required when auto_class_weight is enabled")
+
+    ann_path = os.path.join(nuclear_data_path, 'annotations', 'train.json')
+    if not os.path.exists(ann_path):
+        raise FileNotFoundError(f"nuclear train annotation file not found: {ann_path}")
+
+    with open(ann_path, 'r', encoding='utf-8') as f:
+        payload = json.load(f)
+
+    counts = {class_name: 0 for class_name in CLASS_NAMES}
+    cat_id_to_name = {}
+    for category in payload.get('categories', []):
+        cat_id = category.get('id')
+        cat_name = category.get('name')
+        if cat_id is None or cat_name is None:
+            continue
+        cat_id_to_name[cat_id] = cat_name
+
+    for ann in payload.get('annotations', []):
+        class_name = cat_id_to_name.get(ann.get('category_id'))
+        if class_name in counts:
+            counts[class_name] += 1
+    return counts
+
+
+def generate_smoothed_class_weights(counts, class_weight_power, class_weight_min, class_weight_max):
+    """Generate normalized + clipped inverse-frequency class weights."""
+    weights = []
+    positive_raw_weights = []
+    zero_count_classes = []
+    for class_name in CLASS_NAMES:
+        count = float(counts.get(class_name, 0))
+        if count <= 0:
+            weights.append(0.0)
+            zero_count_classes.append(class_name)
+            continue
+        raw_weight = 1.0 / (count ** class_weight_power)
+        weights.append(raw_weight)
+        positive_raw_weights.append(raw_weight)
+
+    if positive_raw_weights:
+        positive_mean = sum(positive_raw_weights) / len(positive_raw_weights)
+        for idx, class_name in enumerate(CLASS_NAMES):
+            if counts.get(class_name, 0) <= 0:
+                continue
+            normalized = weights[idx] / positive_mean
+            weights[idx] = float(np.clip(normalized, class_weight_min, class_weight_max))
+
+    return weights, zero_count_classes
 
 def train_score(cfg, train_loader, val_loader, test_loader, score_agent, teacher_model=None):
     """ Train score network or energe network without ranking
@@ -275,6 +329,31 @@ def build_segmentation_training_agent(cfg):
     model_cfg.agent_type = 'score'
     model_cfg.enable_segmentation = True
 
+    if getattr(cfg, 'auto_class_weight', True):
+        configured_num_classes = getattr(model_cfg, 'num_object_classes', len(CLASS_NAMES))
+        if configured_num_classes != len(CLASS_NAMES):
+            raise ValueError(
+                "auto_class_weight requires num_object_classes to match "
+                f"datasets_nuclear.CLASS_NAMES ({len(CLASS_NAMES)}), got {configured_num_classes}"
+            )
+        class_counts = collect_nuclear_train_class_counts(getattr(cfg, 'nuclear_data_path', ''))
+        generated_class_weights, zero_count_classes = generate_smoothed_class_weights(
+            counts=class_counts,
+            class_weight_power=getattr(cfg, 'class_weight_power', 0.5),
+            class_weight_min=getattr(cfg, 'class_weight_min', 0.25),
+            class_weight_max=getattr(cfg, 'class_weight_max', 4.0),
+        )
+        model_cfg.generated_class_weights = generated_class_weights
+        model_cfg.class_weight_counts = class_counts
+        model_cfg.zero_count_classes = zero_count_classes
+        print(f"[class_weight] class_counts: {class_counts}")
+        print(f"[class_weight] zero_count_classes: {zero_count_classes}")
+        print(f"[class_weight] generated_class_weights: {generated_class_weights}")
+    else:
+        model_cfg.generated_class_weights = None
+        model_cfg.class_weight_counts = {}
+        model_cfg.zero_count_classes = []
+
     seg_agent = PoseNet(model_cfg)
     seg_agent.load_ckpt(
         model_dir=validate_segmentation_pose_init(cfg),
@@ -386,9 +465,16 @@ def train_segmentation(cfg, train_loader, val_loader, seg_agent):
         best_iou = _to_float(current_best['mask_iou'])
         if mask_iou != best_iou:
             return mask_iou > best_iou
-        return _to_float(metrics['mask_dice']) > _to_float(current_best['mask_dice'])
+        mask_dice = _to_float(metrics['mask_dice'])
+        best_dice = _to_float(current_best['mask_dice'])
+        if mask_dice != best_dice:
+            return mask_dice > best_dice
+        return _to_float(metrics.get('cls_acc_matched', 0.0)) > _to_float(
+            current_best.get('cls_acc_matched', 0.0)
+        )
 
     def _build_summary(latest_metrics, current_best):
+        summary_cfg = getattr(seg_agent, 'cfg', cfg)
         summary = {
             'experiment_name': getattr(cfg, 'log_dir', ''),
             'dataset_path': getattr(cfg, 'nuclear_data_path', ''),
@@ -402,17 +488,30 @@ def train_segmentation(cfg, train_loader, val_loader, seg_agent):
                 getattr(cfg, 'query_injection_layer', None),
             ),
         }
+        generated_class_weights = getattr(summary_cfg, 'generated_class_weights', None)
+        if generated_class_weights is not None:
+            summary['generated_class_weights'] = generated_class_weights
+        class_weight_counts = getattr(summary_cfg, 'class_weight_counts', None)
+        if class_weight_counts:
+            summary['class_weight_counts'] = class_weight_counts
+        zero_count_classes = getattr(summary_cfg, 'zero_count_classes', None)
+        if zero_count_classes is not None:
+            summary['zero_count_classes'] = zero_count_classes
         if latest_metrics is not None:
             summary.update({
                 'latest_mask_iou': _to_float(latest_metrics['mask_iou']),
                 'latest_mask_dice': _to_float(latest_metrics['mask_dice']),
             })
+            if 'cls_acc_matched' in latest_metrics:
+                summary['latest_cls_acc_matched'] = _to_float(latest_metrics['cls_acc_matched'])
         if current_best is not None:
             summary.update({
                 'best_epoch': current_best['epoch'],
                 'best_mask_iou': _to_float(current_best['mask_iou']),
                 'best_mask_dice': _to_float(current_best['mask_dice']),
             })
+            if 'cls_acc_matched' in current_best:
+                summary['best_cls_acc_matched'] = _to_float(current_best['cls_acc_matched'])
         return summary
 
     for epoch in range(seg_agent.clock.epoch, cfg.n_epochs):
@@ -446,12 +545,44 @@ def train_segmentation(cfg, train_loader, val_loader, seg_agent):
                     'epoch': seg_agent.clock.epoch,
                     'mask_iou': val_metrics['mask_iou'],
                     'mask_dice': val_metrics['mask_dice'],
+                    'cls_acc_matched': val_metrics['cls_acc_matched'],
                 }
                 seg_agent.save_ckpt('best')
 
             ckpt_dir = getattr(seg_agent, 'model_dir', None)
             if ckpt_dir:
                 update_summary_json(ckpt_dir, _build_summary(val_metrics, best_metrics))
+                config_cfg = getattr(seg_agent, 'cfg', None)
+                if config_cfg is not None:
+                    if val_metrics is not None:
+                        config_cfg.latest_mask_iou = _to_float(val_metrics['mask_iou'])
+                        config_cfg.latest_mask_dice = _to_float(val_metrics['mask_dice'])
+                        config_cfg.latest_cls_acc_matched = _to_float(
+                            val_metrics.get('cls_acc_matched', 0.0)
+                        )
+                    if best_metrics is not None:
+                        config_cfg.best_epoch = best_metrics['epoch']
+                        config_cfg.best_mask_iou = _to_float(best_metrics['mask_iou'])
+                        config_cfg.best_mask_dice = _to_float(best_metrics['mask_dice'])
+                        config_cfg.best_cls_acc_matched = _to_float(
+                            best_metrics.get('cls_acc_matched', 0.0)
+                        )
+                    write_config_snapshot(config_cfg, ckpt_dir)
+
+            record_info = getattr(seg_agent, 'record_info', None)
+            if callable(record_info) and val_metrics is not None:
+                summary_scalars = {
+                    'latest_mask_iou': _to_float(val_metrics['mask_iou']),
+                    'latest_mask_dice': _to_float(val_metrics['mask_dice']),
+                    'latest_cls_acc_matched': _to_float(val_metrics.get('cls_acc_matched', 0.0)),
+                }
+                if best_metrics is not None:
+                    summary_scalars.update({
+                        'best_mask_iou': _to_float(best_metrics['mask_iou']),
+                        'best_mask_dice': _to_float(best_metrics['mask_dice']),
+                        'best_cls_acc_matched': _to_float(best_metrics.get('cls_acc_matched', 0.0)),
+                    })
+                record_info(summary_scalars, mode='summary')
 
 
 def main():

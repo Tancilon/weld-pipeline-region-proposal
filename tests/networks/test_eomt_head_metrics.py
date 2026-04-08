@@ -71,3 +71,50 @@ def test_eomt_criterion_reports_mask_iou_and_mask_dice_for_matched_masks():
     assert math.isclose(metrics["mask_dice"].item(), 1.0)
     assert math.isclose(metrics["cls_acc_matched"].item(), 1.0)
     assert math.isclose(metrics["matched_count"].item(), 2.0)
+
+
+def test_eomt_criterion_applies_foreground_class_weights_to_cls_loss():
+    class_logits = torch.tensor(
+        [
+            [
+                [0.0, 0.0, 0.0],       # matched query -> class 0 (higher loss)
+                [-8.0, 8.0, -8.0],     # matched query -> class 1 (lower loss)
+            ]
+        ],
+        dtype=torch.float32,
+    )
+    mask_logits = torch.tensor(
+        [
+            [
+                [[10.0, 10.0], [-10.0, -10.0]],
+                [[-10.0, -10.0], [10.0, 10.0]],
+            ]
+        ],
+        dtype=torch.float32,
+    )
+    gt_classes = [torch.tensor([0, 1], dtype=torch.long)]
+    gt_masks = [
+        torch.tensor(
+            [
+                [[1, 1], [0, 0]],
+                [[0, 0], [1, 1]],
+            ],
+            dtype=torch.float32,
+        )
+    ]
+
+    criterion_no_fg_weights = EoMTCriterion(num_classes=2, no_object_weight=0.1)
+    criterion_with_fg_weights = EoMTCriterion(
+        num_classes=2,
+        no_object_weight=0.1,
+        class_weights=[10.0, 1.0],
+    )
+
+    no_fg_weights_losses = criterion_no_fg_weights(
+        class_logits, mask_logits, gt_classes, gt_masks
+    )
+    with_fg_weights_losses = criterion_with_fg_weights(
+        class_logits, mask_logits, gt_classes, gt_masks
+    )
+
+    assert with_fg_weights_losses["cls_loss"].item() > no_fg_weights_losses["cls_loss"].item()
