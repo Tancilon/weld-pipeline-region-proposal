@@ -19,8 +19,9 @@ class NoOpLogger:
 
 
 class WandbLogger:
-    def __init__(self, run):
+    def __init__(self, run, wandb_module):
         self._run = run
+        self._wandb = wandb_module
 
     def add_scalar(self, tag, scalar_value, global_step=None, *args, **kwargs):
         payload = {tag: scalar_value}
@@ -36,7 +37,11 @@ class WandbLogger:
         self._run.log(payload, step=global_step, commit=True)
 
     def add_image(self, tag, img_tensor, global_step=None, *args, **kwargs):
-        self._run.log({tag: img_tensor}, step=global_step, commit=True)
+        self._run.log(
+            {tag: self._wandb.Image(img_tensor)},
+            step=global_step,
+            commit=True,
+        )
 
     def finish(self):
         if hasattr(self._run, "finish"):
@@ -110,4 +115,4 @@ def build_experiment_logger(cfg, ckpt_dir):
     }
     init_kwargs = {key: value for key, value in init_kwargs.items() if value not in ("", None)}
     run = wandb.init(**init_kwargs)
-    return WandbLogger(run)
+    return WandbLogger(run, wandb)

@@ -28,7 +28,11 @@ def _install_fake_wandb(monkeypatch):
         calls["run"] = run
         return run
 
-    fake_wandb = types.SimpleNamespace(init=init)
+    class FakeImage:
+        def __init__(self, value):
+            self.value = value
+
+    fake_wandb = types.SimpleNamespace(init=init, Image=FakeImage)
     monkeypatch.setitem(sys.modules, "wandb", fake_wandb)
     return calls
 
@@ -56,8 +60,7 @@ def test_build_experiment_logger_initializes_wandb_with_expected_mode(monkeypatc
 
 
 def test_build_experiment_logger_disabled_returns_noop(monkeypatch, tmp_path):
-    sentinel = object()
-    monkeypatch.setitem(sys.modules, "wandb", sentinel)
+    monkeypatch.delitem(sys.modules, "wandb", raising=False)
 
     from utils.experiment_logger import NoOpLogger, build_experiment_logger
 
@@ -139,9 +142,11 @@ def test_logger_surface_delegates_to_wandb_run(monkeypatch, tmp_path):
     logger.finish()
 
     run = calls["run"]
+    image_payload = run.logged[2][0]["train/image"]
     assert run.logged == [
         ({"train/loss": 1.25}, 7, True),
         ({"train/loss": 1.25, "train/acc": 0.9}, 7, True),
-        ({"train/image": "fake-image"}, 7, True),
+        ({"train/image": image_payload}, 7, True),
     ]
+    assert image_payload.value == "fake-image"
     assert run.finished is True
