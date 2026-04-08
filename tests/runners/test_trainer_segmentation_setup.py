@@ -260,3 +260,18 @@ def test_build_segmentation_training_agent_uses_score_style_config_and_preserves
         }
     ]
     assert freeze_calls == [agent]
+
+
+def test_resolve_full_checkpoint_path_rejects_segmentation_resume_without_dedicated_checkpoint(
+    trainer_module,
+):
+    cfg = SimpleNamespace(
+        agent_type="segmentation",
+        use_pretrain=True,
+        eval=False,
+        pred=False,
+        pretrained_score_model_path="/tmp/pose-init.pth",
+    )
+
+    with pytest.raises(ValueError, match="segmentation.*full checkpoint"):
+        trainer_module.resolve_full_checkpoint_path(cfg)

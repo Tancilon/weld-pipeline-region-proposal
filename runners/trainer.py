@@ -284,6 +284,20 @@ def build_segmentation_training_agent(cfg):
     return seg_agent
 
 
+def resolve_full_checkpoint_path(cfg):
+    """Resolve the full checkpoint path for resume/eval/pred flows."""
+    if cfg.agent_type == 'segmentation':
+        raise ValueError(
+            "segmentation training does not support full checkpoint resume/eval/pred; "
+            "use a dedicated segmentation checkpoint path instead"
+        )
+    if cfg.agent_type == 'score':
+        return cfg.pretrained_score_model_path
+    if cfg.agent_type in ['energy', 'energy_with_ranking']:
+        return cfg.pretrained_energy_model_path
+    return cfg.pretrained_scale_model_path
+
+
 def train_segmentation(cfg, train_loader, val_loader, seg_agent):
     """Train EoMT segmentation/classification head.
 
@@ -395,14 +409,7 @@ def main():
     ''' Load checkpoints '''
     if cfg.use_pretrain or cfg.eval or cfg.pred:
         tr_agent.load_ckpt(
-            model_dir=(
-                cfg.pretrained_score_model_path if cfg.agent_type == 'score' else (
-                    cfg.pretrained_score_model_path if cfg.agent_type == 'segmentation' else (
-                        cfg.pretrained_energy_model_path if cfg.agent_type in ['energy', 'energy_with_ranking']
-                        else cfg.pretrained_scale_model_path
-                    )
-                )
-            ), 
+            model_dir=resolve_full_checkpoint_path(cfg),
             model_path=True, 
             load_model_only=False
         )
