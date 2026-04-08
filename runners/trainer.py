@@ -289,7 +289,7 @@ def resolve_full_checkpoint_path(cfg):
     if cfg.agent_type == 'segmentation':
         raise ValueError(
             "segmentation training does not support full checkpoint resume/eval/pred; "
-            "use a dedicated segmentation checkpoint path instead"
+            "pretrained_score_model_path is pose-init only"
         )
     if cfg.agent_type == 'score':
         return cfg.pretrained_score_model_path
