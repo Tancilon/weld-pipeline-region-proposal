@@ -140,7 +140,7 @@ def runtime_lib(monkeypatch):
 
 
 def test_runtime_lib_import_and_parser_work_without_runtime_dependencies(monkeypatch):
-    blocked_roots = {"cv2", "datasets", "networks", "sklearn", "cutoop"}
+    blocked_roots = {"cv2", "datasets", "networks", "sklearn", "cutoop", "utils"}
     real_import = builtins.__import__
 
     def guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
@@ -151,6 +151,11 @@ def test_runtime_lib_import_and_parser_work_without_runtime_dependencies(monkeyp
 
     monkeypatch.setattr(builtins, "__import__", guarded_import)
     monkeypatch.delitem(sys.modules, "runners.infer_nuclear_full_lib", raising=False)
+    monkeypatch.delitem(sys.modules, "utils", raising=False)
+    monkeypatch.delitem(sys.modules, "utils.misc", raising=False)
+    monkeypatch.delitem(sys.modules, "utils.metrics", raising=False)
+    monkeypatch.delitem(sys.modules, "utils.transforms", raising=False)
+    monkeypatch.delitem(sys.modules, "utils.datasets_utils", raising=False)
 
     module = importlib.import_module("runners.infer_nuclear_full_lib")
 
@@ -268,6 +273,74 @@ def test_load_main_agent_checkpoint_loads_and_wraps_errors(runtime_lib, monkeypa
     bad_agent = FakeAgent(should_fail=True)
     with pytest.raises(ValueError, match="seg-bad.pth.*size mismatch for head.weight"):
         runtime_lib.load_main_agent_checkpoint(bad_agent, "/tmp/seg-bad.pth")
+
+
+def test_load_model_only_allows_missing_buffer_drift(runtime_lib, monkeypatch):
+    class FakeAuxNet(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.tensor([1.0]))
+            self.register_buffer("running_mean", torch.tensor([9.0]))
+
+    agent = SimpleNamespace(net=FakeAuxNet())
+    checkpoint = {"model_state_dict": {"weight": torch.tensor([3.0])}}
+
+    monkeypatch.setattr(
+        runtime_lib,
+        "get_torch_module",
+        lambda: SimpleNamespace(load=lambda path, map_location=None: checkpoint),
+    )
+
+    runtime_lib.load_model_only(agent, "/tmp/energy.pth", "energy")
+
+    assert torch.equal(agent.net.weight.detach(), torch.tensor([3.0]))
+    assert torch.equal(agent.net.running_mean, torch.tensor([9.0]))
+
+
+def test_load_model_only_rejects_missing_parameter_key(runtime_lib, monkeypatch):
+    class FakeAuxNet(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.tensor([1.0]))
+            self.register_buffer("running_mean", torch.tensor([9.0]))
+
+    agent = SimpleNamespace(net=FakeAuxNet())
+    checkpoint = {"model_state_dict": {"running_mean": torch.tensor([9.0])}}
+
+    monkeypatch.setattr(
+        runtime_lib,
+        "get_torch_module",
+        lambda: SimpleNamespace(load=lambda path, map_location=None: checkpoint),
+    )
+
+    with pytest.raises(ValueError, match="missing parameter keys.*weight"):
+        runtime_lib.load_model_only(agent, "/tmp/energy.pth", "energy")
+
+
+def test_load_model_only_rejects_unexpected_key(runtime_lib, monkeypatch):
+    class FakeAuxNet(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.tensor([1.0]))
+            self.register_buffer("running_mean", torch.tensor([9.0]))
+
+    agent = SimpleNamespace(net=FakeAuxNet())
+    checkpoint = {
+        "model_state_dict": {
+            "weight": torch.tensor([3.0]),
+            "running_mean": torch.tensor([9.0]),
+            "extra.bias": torch.tensor([1.0]),
+        }
+    }
+
+    monkeypatch.setattr(
+        runtime_lib,
+        "get_torch_module",
+        lambda: SimpleNamespace(load=lambda path, map_location=None: checkpoint),
+    )
+
+    with pytest.raises(ValueError, match="unexpected keys.*extra.bias"):
+        runtime_lib.load_model_only(agent, "/tmp/scale.pth", "scale")
 
 
 def test_init_pipeline_agents_builds_one_main_agent_plus_optional_aux_agents(

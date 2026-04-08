@@ -134,6 +134,27 @@ def _load_model_state_dict(checkpoint, ckpt_path):
     return state_dict
 
 
+def _get_model_parameter_and_buffer_keys(model):
+    parameter_keys = set()
+    buffer_keys = set()
+
+    named_parameters = getattr(model, "named_parameters", None)
+    if callable(named_parameters):
+        parameter_keys = {name for name, _ in named_parameters()}
+
+    named_buffers = getattr(model, "named_buffers", None)
+    if callable(named_buffers):
+        buffer_keys = {name for name, _ in named_buffers()}
+
+    return parameter_keys, buffer_keys
+
+
+def _format_key_list(keys):
+    if not keys:
+        return "[]"
+    return "[" + ", ".join(sorted(keys)) + "]"
+
+
 def load_main_agent_checkpoint(agent, seg_ckpt_path):
     torch = get_torch_module()
     print(f"Loading single-agent seg checkpoint: {seg_ckpt_path}")
@@ -155,14 +176,28 @@ def load_model_only(agent, ckpt_path, name):
     print(f"Loading {name} checkpoint: {ckpt_path}")
     checkpoint = torch.load(ckpt_path, map_location="cpu")
     state_dict = _load_model_state_dict(checkpoint, ckpt_path)
-    model_state_dict = agent.net.state_dict()
-    if not isinstance(model_state_dict, dict):
-        model_state_dict = dict(model_state_dict)
-    overlapping_keys = set(state_dict).intersection(model_state_dict)
-    if not overlapping_keys:
+    parameter_keys, buffer_keys = _get_model_parameter_and_buffer_keys(agent.net)
+    if not parameter_keys and not buffer_keys:
         raise ValueError(
-            f"{name} checkpoint '{ckpt_path}' does not share any parameter names "
-            "with the target model and is unsafe to load."
+            f"{name} checkpoint '{ckpt_path}' cannot be validated against the "
+            "target model because it does not expose named parameters or buffers."
+        )
+
+    checkpoint_keys = set(state_dict)
+    missing_parameter_keys = sorted(parameter_keys - checkpoint_keys)
+    unexpected_keys = sorted(checkpoint_keys - (parameter_keys | buffer_keys))
+    if missing_parameter_keys or unexpected_keys:
+        details = []
+        if missing_parameter_keys:
+            details.append(
+                "missing parameter keys " + _format_key_list(missing_parameter_keys)
+            )
+        if unexpected_keys:
+            details.append("unexpected keys " + _format_key_list(unexpected_keys))
+        raise ValueError(
+            f"{name} checkpoint '{ckpt_path}' is incompatible with the target model: "
+            + "; ".join(details)
+            + "."
         )
     try:
         load_result = agent.net.load_state_dict(state_dict, strict=False)
@@ -172,10 +207,34 @@ def load_model_only(agent, ckpt_path, name):
         ) from exc
     missing_keys = list(getattr(load_result, "missing_keys", []))
     unexpected_keys = list(getattr(load_result, "unexpected_keys", []))
-    if missing_keys or unexpected_keys:
+    missing_parameter_keys = sorted(set(missing_keys).intersection(parameter_keys))
+    fatal_unexpected_keys = sorted(
+        key for key in unexpected_keys if key not in buffer_keys
+    )
+    if missing_parameter_keys or fatal_unexpected_keys:
+        details = []
+        if missing_parameter_keys:
+            details.append(
+                "missing parameter keys " + _format_key_list(missing_parameter_keys)
+            )
+        if fatal_unexpected_keys:
+            details.append("unexpected keys " + _format_key_list(fatal_unexpected_keys))
+        raise ValueError(
+            f"{name} checkpoint '{ckpt_path}' is incompatible with the target model: "
+            + "; ".join(details)
+            + "."
+        )
+    tolerated_missing_buffers = sorted(
+        key for key in missing_keys if key in buffer_keys
+    )
+    tolerated_unexpected_buffers = sorted(
+        key for key in unexpected_keys if key in buffer_keys
+    )
+    if tolerated_missing_buffers or tolerated_unexpected_buffers:
         print(
             f"Loaded {name} checkpoint '{ckpt_path}' with non-fatal key mismatches: "
-            f"missing={missing_keys or '[]'}, unexpected={unexpected_keys or '[]'}"
+            f"missing={_format_key_list(tolerated_missing_buffers)}, "
+            f"unexpected={_format_key_list(tolerated_unexpected_buffers)}"
         )
 
 
