@@ -69,7 +69,7 @@ def get_dbscan_class():
     except ModuleNotFoundError as exc:
         raise ModuleNotFoundError(
             "DBSCAN clustering requires scikit-learn at runtime. "
-            "Install 'sklearn' or disable clustering before pose aggregation."
+            "Install 'scikit-learn' or disable clustering before pose aggregation."
         ) from exc
     return DBSCAN
 
@@ -155,12 +155,28 @@ def load_model_only(agent, ckpt_path, name):
     print(f"Loading {name} checkpoint: {ckpt_path}")
     checkpoint = torch.load(ckpt_path, map_location="cpu")
     state_dict = _load_model_state_dict(checkpoint, ckpt_path)
+    model_state_dict = agent.net.state_dict()
+    if not isinstance(model_state_dict, dict):
+        model_state_dict = dict(model_state_dict)
+    overlapping_keys = set(state_dict).intersection(model_state_dict)
+    if not overlapping_keys:
+        raise ValueError(
+            f"{name} checkpoint '{ckpt_path}' does not share any parameter names "
+            "with the target model and is unsafe to load."
+        )
     try:
-        agent.net.load_state_dict(state_dict, strict=True)
+        load_result = agent.net.load_state_dict(state_dict, strict=False)
     except RuntimeError as exc:
         raise ValueError(
             f"{name} checkpoint could not be loaded from '{ckpt_path}': {exc}"
         ) from exc
+    missing_keys = list(getattr(load_result, "missing_keys", []))
+    unexpected_keys = list(getattr(load_result, "unexpected_keys", []))
+    if missing_keys or unexpected_keys:
+        print(
+            f"Loaded {name} checkpoint '{ckpt_path}' with non-fatal key mismatches: "
+            f"missing={missing_keys or '[]'}, unexpected={unexpected_keys or '[]'}"
+        )
 
 
 def build_cfg(args, agent_type="score", enable_segmentation=False):

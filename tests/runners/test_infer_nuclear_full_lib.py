@@ -1,4 +1,6 @@
+import builtins
 import importlib
+import subprocess
 import sys
 import types
 from pathlib import Path
@@ -138,19 +140,37 @@ def runtime_lib(monkeypatch):
 
 
 def test_runtime_lib_import_and_parser_work_without_runtime_dependencies(monkeypatch):
+    blocked_roots = {"cv2", "datasets", "networks", "sklearn", "cutoop"}
+    real_import = builtins.__import__
+
+    def guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
+        root = name.split(".", 1)[0]
+        if root in blocked_roots:
+            raise AssertionError(f"Unexpected eager import of runtime module: {name}")
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
     monkeypatch.delitem(sys.modules, "runners.infer_nuclear_full_lib", raising=False)
-    monkeypatch.delitem(sys.modules, "sklearn.cluster", raising=False)
-    monkeypatch.delitem(sys.modules, "sklearn", raising=False)
-    monkeypatch.delitem(sys.modules, "networks.reward", raising=False)
-    monkeypatch.delitem(sys.modules, "utils.misc", raising=False)
-    monkeypatch.delitem(sys.modules, "utils.metrics", raising=False)
-    monkeypatch.delitem(sys.modules, "utils.transforms", raising=False)
 
     module = importlib.import_module("runners.infer_nuclear_full_lib")
 
     parser = module.build_arg_parser()
     args = parser.parse_args(["--nuclear_data_path", "/tmp/data", "--seg_ckpt", "/tmp/seg.pth"])
     assert args.seg_ckpt == "/tmp/seg.pth"
+
+
+def test_runner_help_exits_successfully():
+    result = subprocess.run(
+        [sys.executable, "runners/infer_nuclear_full.py", "--help"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert "usage:" in result.stdout
+    assert "--seg_ckpt" in result.stdout
 
 
 def test_build_arg_parser_has_no_pose_checkpoint_argument(runtime_lib):
@@ -195,6 +215,59 @@ def test_validate_single_agent_seg_state_dict_rejects_legacy_checkpoint(runtime_
 
     with pytest.raises(ValueError, match="single-agent|legacy|query_embed|seg_blocks"):
         runtime_lib.validate_single_agent_seg_state_dict(legacy_state_dict)
+
+
+def test_validate_single_agent_seg_state_dict_accepts_single_agent_checkpoint(runtime_lib):
+    state_dict = {
+        "dino_wrapper.query_embed.weight": torch.zeros(1),
+        "eomt_head.class_head.weight": torch.zeros(1),
+        "dino_wrapper.seg_blocks.0.weight": torch.zeros(1),
+        "dino_wrapper.dino.blocks.0.attn.qkv.weight": torch.zeros(1),
+        "pose_score_net.fusion_tail.weight": torch.zeros(1),
+    }
+
+    validated = runtime_lib.validate_single_agent_seg_state_dict(state_dict)
+
+    assert validated is state_dict
+
+
+def test_load_main_agent_checkpoint_loads_and_wraps_errors(runtime_lib, monkeypatch):
+    state_dict = {
+        "dino_wrapper.query_embed.weight": torch.zeros(1),
+        "eomt_head.class_head.weight": torch.zeros(1),
+        "dino_wrapper.seg_blocks.0.weight": torch.zeros(1),
+        "dino_wrapper.dino.blocks.0.attn.qkv.weight": torch.zeros(1),
+        "pose_score_net.fusion_tail.weight": torch.zeros(1),
+    }
+
+    class FakeNet:
+        def __init__(self, should_fail=False):
+            self.should_fail = should_fail
+            self.load_calls = []
+
+        def load_state_dict(self, loaded_state_dict, strict):
+            self.load_calls.append((loaded_state_dict, strict))
+            if self.should_fail:
+                raise RuntimeError("size mismatch for head.weight")
+            return SimpleNamespace(missing_keys=[], unexpected_keys=[])
+
+    class FakeAgent:
+        def __init__(self, should_fail=False):
+            self.net = FakeNet(should_fail=should_fail)
+
+    monkeypatch.setattr(
+        runtime_lib,
+        "get_torch_module",
+        lambda: SimpleNamespace(load=lambda path, map_location=None: {"model_state_dict": state_dict}),
+    )
+
+    ok_agent = FakeAgent()
+    runtime_lib.load_main_agent_checkpoint(ok_agent, "/tmp/seg-ok.pth")
+    assert ok_agent.net.load_calls == [(state_dict, True)]
+
+    bad_agent = FakeAgent(should_fail=True)
+    with pytest.raises(ValueError, match="seg-bad.pth.*size mismatch for head.weight"):
+        runtime_lib.load_main_agent_checkpoint(bad_agent, "/tmp/seg-bad.pth")
 
 
 def test_init_pipeline_agents_builds_one_main_agent_plus_optional_aux_agents(
