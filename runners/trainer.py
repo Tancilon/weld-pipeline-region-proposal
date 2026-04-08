@@ -22,6 +22,7 @@ from networks.posenet_agent import PoseNet
 from configs.config import get_config
 from utils.misc import exists_or_mkdir, get_pose_representation
 from utils.genpose_utils import merge_results
+from utils.experiment_logger import update_summary_json
 from utils.misc import average_quaternion_batch, parallel_setup, parallel_cleanup
 from utils.metrics import get_metrics, get_rot_matrix
 from utils.so3_visualize import visualize_so3
@@ -307,6 +308,77 @@ def train_segmentation(cfg, train_loader, val_loader, seg_agent):
         val_loader: Validation data loader.
         seg_agent: PoseNet agent with enable_segmentation=True.
     """
+    best_metrics = None
+
+    def _batch_size(batch):
+        if isinstance(batch, dict):
+            gt_classes = batch.get('gt_classes')
+            if gt_classes is not None:
+                return len(gt_classes)
+        return 1
+
+    def _to_float(value):
+        if torch.is_tensor(value):
+            return round(float(value.item()), 6)
+        return round(float(value), 6)
+
+    def _aggregate_metrics(loader):
+        if loader is None:
+            return None
+
+        totals = {}
+        total_samples = 0
+        for val_batch in loader:
+            val_batch = process_batch_seg(val_batch, cfg.device)
+            batch_results = seg_agent.eval_func(val_batch, 'val', gf_mode='segmentation')
+            batch_size = _batch_size(val_batch)
+            total_samples += batch_size
+            for key, value in batch_results.items():
+                totals[key] = totals.get(key, 0.0) + _to_float(value) * batch_size
+
+        if total_samples == 0:
+            return None
+
+        return {
+            key: torch.tensor(value / total_samples, dtype=torch.float64)
+            for key, value in totals.items()
+        }
+
+    def _is_better(metrics, current_best):
+        if metrics is None:
+            return False
+        if current_best is None:
+            return True
+
+        mask_iou = _to_float(metrics['mask_iou'])
+        best_iou = _to_float(current_best['mask_iou'])
+        if mask_iou != best_iou:
+            return mask_iou > best_iou
+        return _to_float(metrics['mask_dice']) > _to_float(current_best['mask_dice'])
+
+    def _build_summary(latest_metrics, current_best):
+        summary = {
+            'experiment_name': getattr(cfg, 'log_dir', ''),
+            'dataset_path': getattr(cfg, 'nuclear_data_path', ''),
+            'pose_init_checkpoint': getattr(cfg, 'pretrained_score_model_path', ''),
+            'latest_epoch': seg_agent.clock.epoch,
+            'image_size': getattr(cfg, 'img_size', None),
+            'num_queries': getattr(cfg, 'num_queries', None),
+            'query_injection_layer': getattr(cfg, 'query_injection_layer', None),
+        }
+        if latest_metrics is not None:
+            summary.update({
+                'latest_mask_iou': _to_float(latest_metrics['mask_iou']),
+                'latest_mask_dice': _to_float(latest_metrics['mask_dice']),
+            })
+        if current_best is not None:
+            summary.update({
+                'best_epoch': current_best['epoch'],
+                'best_mask_iou': _to_float(current_best['mask_iou']),
+                'best_mask_dice': _to_float(current_best['mask_dice']),
+            })
+        return summary
+
     for epoch in range(seg_agent.clock.epoch, cfg.n_epochs):
         torch.cuda.empty_cache()
         pbar = tqdm(train_loader)
@@ -327,11 +399,23 @@ def train_segmentation(cfg, train_loader, val_loader, seg_agent):
 
         # Evaluation
         if seg_agent.clock.epoch % cfg.eval_freq == 0:
-            if val_loader is not None:
-                val_batch = next(iter(val_loader))
-                val_batch = process_batch_seg(val_batch, cfg.device)
-                seg_agent.eval_func(val_batch, 'val', gf_mode='segmentation')
-            seg_agent.save_ckpt()
+            val_metrics = _aggregate_metrics(val_loader)
+            if val_metrics is not None:
+                seg_agent.record_losses(val_metrics, 'val')
+
+            seg_agent.save_ckpt('latest')
+
+            if _is_better(val_metrics, best_metrics):
+                best_metrics = {
+                    'epoch': seg_agent.clock.epoch,
+                    'mask_iou': val_metrics['mask_iou'],
+                    'mask_dice': val_metrics['mask_dice'],
+                }
+                seg_agent.save_ckpt('best')
+
+            ckpt_dir = getattr(seg_agent, 'model_dir', None)
+            if ckpt_dir:
+                update_summary_json(ckpt_dir, _build_summary(val_metrics, best_metrics))
 
 
 def main():

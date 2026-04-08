@@ -8,7 +8,6 @@ import torch.nn as nn
 import torch.optim as optim
 import random
 
-from tensorboardX import SummaryWriter
 from ipdb import set_trace
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
@@ -26,6 +25,7 @@ from utils.genpose_utils import TrainClock, get_pose_dim
 from utils.misc import exists_or_mkdir, average_quaternion_batch, get_pose_representation
 from utils.visualize import create_grid_image, test_time_visulize
 from utils.metrics import get_metrics, get_rot_matrix
+from utils.experiment_logger import build_experiment_logger, write_config_snapshot
 from utils.transforms import *
 
 
@@ -53,11 +53,12 @@ class PoseNet(nn.Module):
         self.pts_feature = False
 
         # get checkpoint and writer path
-        self.model_dir, writer_path = get_ckpt_and_writer_path(self.cfg)
+        self.model_dir, _ = get_ckpt_and_writer_path(self.cfg)
         
         # init writer
         if self.cfg.is_train:
-            self.writer = SummaryWriter(writer_path)
+            self.writer = build_experiment_logger(self.cfg, self.model_dir)
+            write_config_snapshot(self.cfg, self.model_dir)
         
         # init sde
         self.prior_fn, self.marginal_prob_fn, self.sde_fn, self.sampling_eps, self.T = init_sde(self.cfg.sde_mode)
@@ -392,10 +393,13 @@ class PoseNet(nn.Module):
                 class_logits, mask_logits,
                 data['gt_classes'], data['gt_masks'],
             )
-            self.record_losses(seg_losses, data_mode)
+            seg_metrics = self.seg_criterion.evaluate_batch(
+                class_logits, mask_logits,
+                data['gt_classes'], data['gt_masks'],
+            )
 
         self.ema.restore(self.net.parameters())
-        return seg_losses
+        return {**seg_losses, **seg_metrics}
 
     def encode_func(self, data):
         data['pts_feat'] = self.net(data, mode='pts_feature')
@@ -491,13 +495,13 @@ class PoseNet(nn.Module):
 
     def eval_func(self, data, data_mode, pose_samples=None, gf_mode='score'):
         if gf_mode in ['score', 'energy_wo_ranking']:
-            metrics, sampler_mode_list = self.eval_score_func(data, data_mode)
+            return self.eval_score_func(data, data_mode)
         elif gf_mode == 'energy':
-            losses = self.eval_energy_func(data, data_mode, pose_samples)
+            return self.eval_energy_func(data, data_mode, pose_samples)
         elif gf_mode == 'scale':
-            metric = self.eval_scale_func(data, data_mode)
+            return self.eval_scale_func(data, data_mode)
         elif gf_mode == 'segmentation':
-            losses = self.eval_seg_func(data, data_mode)
+            return self.eval_seg_func(data, data_mode)
         else:
             raise NotImplementedError
         

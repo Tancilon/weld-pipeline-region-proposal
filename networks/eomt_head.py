@@ -10,7 +10,6 @@ criterion with Hungarian matching.
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import numpy as np
 from scipy.optimize import linear_sum_assignment
 
 
@@ -226,8 +225,64 @@ class EoMTCriterion(nn.Module):
 
         cost_np = cost.detach().cpu().numpy()
         pred_idx, gt_idx = linear_sum_assignment(cost_np)
-        return (torch.as_tensor(pred_idx, dtype=torch.long),
-                torch.as_tensor(gt_idx, dtype=torch.long))
+        return (
+            torch.as_tensor(pred_idx, dtype=torch.long, device=class_logits.device),
+            torch.as_tensor(gt_idx, dtype=torch.long, device=class_logits.device),
+        )
+
+    def evaluate_batch(self, class_logits, mask_logits, gt_classes_list, gt_masks_list):
+        """Compute matched segmentation quality metrics over a batch."""
+        bs = class_logits.shape[0]
+        device = class_logits.device
+
+        total_iou = torch.tensor(0.0, device=device)
+        total_dice = torch.tensor(0.0, device=device)
+        total_cls_acc = torch.tensor(0.0, device=device)
+        total_matches = 0
+
+        for b in range(bs):
+            cls_pred = class_logits[b]
+            msk_pred = mask_logits[b]
+            gt_cls = gt_classes_list[b].to(device)
+            gt_msk = gt_masks_list[b].to(device)
+
+            pred_idx, gt_idx = self._hungarian_match(cls_pred, msk_pred, gt_cls, gt_msk)
+            if len(pred_idx) == 0:
+                continue
+
+            matched_pred_masks = (msk_pred[pred_idx].sigmoid() >= 0.5).float().flatten(1)
+            matched_gt_masks = gt_msk[gt_idx].float().flatten(1)
+
+            intersection = (matched_pred_masks * matched_gt_masks).sum(dim=-1)
+            pred_area = matched_pred_masks.sum(dim=-1)
+            gt_area = matched_gt_masks.sum(dim=-1)
+            union = pred_area + gt_area - intersection
+
+            match_iou = (intersection + 1e-6) / (union + 1e-6)
+            match_dice = (2.0 * intersection + 1e-6) / (pred_area + gt_area + 1e-6)
+            match_cls_acc = (
+                cls_pred[pred_idx].argmax(dim=-1) == gt_cls[gt_idx]
+            ).float()
+
+            total_iou += match_iou.sum()
+            total_dice += match_dice.sum()
+            total_cls_acc += match_cls_acc.sum()
+            total_matches += len(pred_idx)
+
+        if total_matches == 0:
+            zero = torch.tensor(0.0, device=device)
+            return {
+                'mask_iou': zero,
+                'mask_dice': zero,
+                'cls_acc_matched': zero,
+            }
+
+        denom = torch.tensor(float(total_matches), device=device)
+        return {
+            'mask_iou': total_iou / denom,
+            'mask_dice': total_dice / denom,
+            'cls_acc_matched': total_cls_acc / denom,
+        }
 
     def forward(self, class_logits, mask_logits, gt_classes_list, gt_masks_list):
         """Compute losses over a batch.

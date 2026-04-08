@@ -1,4 +1,5 @@
 import importlib
+import json
 import sys
 import types
 from pathlib import Path
@@ -154,6 +155,11 @@ def trainer_module(monkeypatch):
     _install_module(monkeypatch, "utils.so3_visualize", visualize_so3=lambda *args, **kwargs: None)
     _install_module(monkeypatch, "utils.visualize", create_grid_image=lambda *args, **kwargs: None)
     _install_module(monkeypatch, "utils.transforms")
+    _install_module(
+        monkeypatch,
+        "utils.experiment_logger",
+        update_summary_json=lambda *args, **kwargs: None,
+    )
     _install_module(monkeypatch, "cutoop.utils", draw_3d_bbox=lambda *args, **kwargs: None)
     _install_module(monkeypatch, "cutoop.transform")
     _install_module(monkeypatch, "cutoop.data_types")
@@ -275,3 +281,190 @@ def test_resolve_full_checkpoint_path_rejects_segmentation_resume_without_dedica
 
     with pytest.raises(ValueError, match="segmentation.*full checkpoint"):
         trainer_module.resolve_full_checkpoint_path(cfg)
+
+
+def test_train_segmentation_updates_latest_and_best_from_val_mask_iou(
+    monkeypatch, trainer_module
+):
+    processed_batches = []
+    monkeypatch.setattr(
+        trainer_module,
+        "process_batch_seg",
+        lambda batch, device: processed_batches.append((batch, device)) or batch,
+    )
+
+    train_loader = [[{"train_epoch": 0}], [{"train_epoch": 1}]]
+    val_loader = [{"val_batch": 0}, {"val_batch": 1}]
+
+    eval_results = iter(
+        [
+            {"cls_loss": torch.tensor(1.0), "mask_loss": torch.tensor(2.0), "dice_loss": torch.tensor(3.0), "total_loss": torch.tensor(6.0), "mask_iou": torch.tensor(0.50), "mask_dice": torch.tensor(0.60)},
+            {"cls_loss": torch.tensor(1.0), "mask_loss": torch.tensor(2.0), "dice_loss": torch.tensor(3.0), "total_loss": torch.tensor(6.0), "mask_iou": torch.tensor(0.70), "mask_dice": torch.tensor(0.80)},
+            {"cls_loss": torch.tensor(1.5), "mask_loss": torch.tensor(2.5), "dice_loss": torch.tensor(3.5), "total_loss": torch.tensor(7.5), "mask_iou": torch.tensor(0.60), "mask_dice": torch.tensor(0.70)},
+            {"cls_loss": torch.tensor(1.5), "mask_loss": torch.tensor(2.5), "dice_loss": torch.tensor(3.5), "total_loss": torch.tensor(7.5), "mask_iou": torch.tensor(0.60), "mask_dice": torch.tensor(0.90)},
+        ]
+    )
+
+    class FakeClock:
+        def __init__(self):
+            self.epoch = 0
+            self.step = 0
+
+        def tick(self):
+            self.step += 1
+
+        def tock(self):
+            self.epoch += 1
+
+    class FakeAgent:
+        def __init__(self):
+            self.clock = FakeClock()
+            self.saved = []
+            self.recorded = []
+
+        def update_learning_rate(self):
+            return None
+
+        def train_func(self, data, gf_mode):
+            return {"total_loss": torch.tensor(1.0)}
+
+        def eval_func(self, data, data_mode, gf_mode):
+            assert data_mode == "val"
+            assert gf_mode == "segmentation"
+            return next(eval_results)
+
+        def record_losses(self, loss_dict, mode):
+            self.recorded.append((mode, {k: float(v) for k, v in loss_dict.items()}))
+
+        def save_ckpt(self, name=None):
+            self.saved.append(name)
+
+    cfg = SimpleNamespace(
+        device="cpu",
+        n_epochs=2,
+        warmup=0,
+        eval_freq=1,
+        log_dir="seg-exp",
+        nuclear_data_path="/tmp/nuclear",
+        pretrained_score_model_path="/tmp/pose-init.pth",
+        img_size=224,
+        num_queries=50,
+        query_injection_layer=6,
+    )
+    seg_agent = FakeAgent()
+
+    trainer_module.train_segmentation(cfg, train_loader, val_loader, seg_agent)
+
+    assert len(processed_batches) == 8
+    assert seg_agent.saved == ["latest", "best", "latest", "best"]
+    assert seg_agent.recorded == [
+        (
+            "val",
+            {
+                "cls_loss": 1.0,
+                "mask_loss": 2.0,
+                "dice_loss": 3.0,
+                "total_loss": 6.0,
+                "mask_iou": 0.6,
+                "mask_dice": 0.7,
+            },
+        ),
+        (
+            "val",
+            {
+                "cls_loss": 1.5,
+                "mask_loss": 2.5,
+                "dice_loss": 3.5,
+                "total_loss": 7.5,
+                "mask_iou": 0.6,
+                "mask_dice": 0.8,
+            },
+        ),
+    ]
+
+
+def test_train_segmentation_writes_summary_with_best_and_latest(
+    monkeypatch, tmp_path, trainer_module
+):
+    monkeypatch.setattr(trainer_module, "process_batch_seg", lambda batch, device: batch)
+
+    def fake_update_summary_json(ckpt_dir, summary_update):
+        summary_path = Path(ckpt_dir) / "summary.json"
+        if summary_path.exists():
+            summary = json.loads(summary_path.read_text())
+        else:
+            summary = {}
+        summary.update(summary_update)
+        summary_path.write_text(json.dumps(summary, sort_keys=True))
+        return summary_path
+
+    monkeypatch.setattr(trainer_module, "update_summary_json", fake_update_summary_json)
+
+    class FakeClock:
+        def __init__(self):
+            self.epoch = 0
+            self.step = 0
+
+        def tick(self):
+            self.step += 1
+
+        def tock(self):
+            self.epoch += 1
+
+    class FakeAgent:
+        def __init__(self):
+            self.clock = FakeClock()
+            self.model_dir = tmp_path.as_posix()
+
+        def update_learning_rate(self):
+            return None
+
+        def train_func(self, data, gf_mode):
+            return {"total_loss": torch.tensor(1.0)}
+
+        def eval_func(self, data, data_mode, gf_mode):
+            return {
+                "cls_loss": torch.tensor(1.0),
+                "mask_loss": torch.tensor(2.0),
+                "dice_loss": torch.tensor(3.0),
+                "total_loss": torch.tensor(6.0),
+                "mask_iou": torch.tensor(0.75),
+                "mask_dice": torch.tensor(0.80),
+            }
+
+        def record_losses(self, loss_dict, mode):
+            return None
+
+        def save_ckpt(self, name=None):
+            return None
+
+    cfg = SimpleNamespace(
+        device="cpu",
+        n_epochs=1,
+        warmup=0,
+        eval_freq=1,
+        log_dir="seg-exp",
+        nuclear_data_path="/tmp/nuclear",
+        pretrained_score_model_path="/tmp/pose-init.pth",
+        img_size=224,
+        num_queries=50,
+        query_injection_layer=6,
+    )
+
+    trainer_module.train_segmentation(cfg, [[{"train": 0}]], [{"val": 0}], FakeAgent())
+
+    payload = json.loads((tmp_path / "summary.json").read_text())
+    assert payload == {
+        "best_epoch": 1,
+        "best_mask_dice": 0.8,
+        "best_mask_iou": 0.75,
+        "dataset_path": "/tmp/nuclear",
+        "experiment_name": "seg-exp",
+        "image_size": 224,
+        "latest_epoch": 1,
+        "latest_mask_dice": 0.8,
+        "latest_mask_iou": 0.75,
+        "num_queries": 50,
+        "pose_init_checkpoint": "/tmp/pose-init.pth",
+        "query_injection_layer": 6,
+    }
