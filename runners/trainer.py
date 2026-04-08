@@ -1,6 +1,7 @@
 import sys
 import os
 import argparse
+import copy
 import pickle
 import time
 import json
@@ -267,6 +268,22 @@ def freeze_pose_params(agent):
     print(f"[freeze_pose_params] Trainable: {trainable:,} / Total: {total:,}")
 
 
+def build_segmentation_training_agent(cfg):
+    """Build the segmentation trainer with score-style pose weights."""
+    model_cfg = copy.copy(cfg)
+    model_cfg.agent_type = 'score'
+    model_cfg.enable_segmentation = True
+
+    seg_agent = PoseNet(model_cfg)
+    seg_agent.load_ckpt(
+        model_dir=validate_segmentation_pose_init(cfg),
+        model_path=True,
+        load_model_only=True,
+    )
+    freeze_pose_params(seg_agent)
+    return seg_agent
+
+
 def train_segmentation(cfg, train_loader, val_loader, seg_agent):
     """Train EoMT segmentation/classification head.
 
@@ -371,15 +388,7 @@ def main():
         tr_agent = scale_agent
 
     elif cfg.agent_type == 'segmentation':
-        cfg.enable_segmentation = True
-        seg_agent = PoseNet(cfg)
-        seg_agent.load_ckpt(
-            model_dir=cfg.pretrained_score_model_path,
-            model_path=True,
-            load_model_only=True,
-        )
-        freeze_pose_params(seg_agent)
-        tr_agent = seg_agent
+        tr_agent = build_segmentation_training_agent(cfg)
     else:
         raise NotImplementedError
     
@@ -388,8 +397,10 @@ def main():
         tr_agent.load_ckpt(
             model_dir=(
                 cfg.pretrained_score_model_path if cfg.agent_type == 'score' else (
-                    cfg.pretrained_energy_model_path if cfg.agent_type in ['energy', 'energy_with_ranking']
+                    cfg.pretrained_score_model_path if cfg.agent_type == 'segmentation' else (
+                        cfg.pretrained_energy_model_path if cfg.agent_type in ['energy', 'energy_with_ranking']
                         else cfg.pretrained_scale_model_path
+                    )
                 )
             ), 
             model_path=True, 

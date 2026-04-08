@@ -212,3 +212,51 @@ def test_freeze_pose_params_raises_when_required_segmentation_modules_missing(tr
 
     with pytest.raises(RuntimeError, match="eomt_head|dino_wrapper.seg_blocks"):
         trainer_module.freeze_pose_params(agent)
+
+
+def test_build_segmentation_training_agent_uses_score_style_config_and_preserves_training_cfg(
+    monkeypatch, trainer_module
+):
+    created_cfgs = []
+    load_calls = []
+    freeze_calls = []
+
+    class RecordingAgent:
+        def __init__(self, cfg):
+            created_cfgs.append(cfg)
+            self.cfg = cfg
+            self.net = FakeNet()
+            self.clock = SimpleNamespace(epoch=0, step=0)
+
+        def load_ckpt(self, **kwargs):
+            load_calls.append(kwargs)
+
+    def fake_freeze_pose_params(agent):
+        freeze_calls.append(agent)
+
+    monkeypatch.setattr(trainer_module, "PoseNet", RecordingAgent)
+    monkeypatch.setattr(trainer_module, "freeze_pose_params", fake_freeze_pose_params)
+
+    cfg = SimpleNamespace(
+        agent_type="segmentation",
+        enable_segmentation=False,
+        pretrained_score_model_path="/tmp/pose-init.pth",
+    )
+
+    agent = trainer_module.build_segmentation_training_agent(cfg)
+
+    assert cfg.agent_type == "segmentation"
+    assert cfg.enable_segmentation is False
+    assert len(created_cfgs) == 1
+    assert created_cfgs[0] is agent.cfg
+    assert agent.cfg is not cfg
+    assert agent.cfg.agent_type == "score"
+    assert agent.cfg.enable_segmentation is True
+    assert load_calls == [
+        {
+            "model_dir": "/tmp/pose-init.pth",
+            "model_path": True,
+            "load_model_only": True,
+        }
+    ]
+    assert freeze_calls == [agent]
