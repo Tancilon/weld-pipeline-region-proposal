@@ -70,3 +70,4 @@ def test_eomt_criterion_reports_mask_iou_and_mask_dice_for_matched_masks():
     assert math.isclose(metrics["mask_iou"].item(), 1.0)
     assert math.isclose(metrics["mask_dice"].item(), 1.0)
     assert math.isclose(metrics["cls_acc_matched"].item(), 1.0)
+    assert math.isclose(metrics["matched_count"].item(), 2.0)

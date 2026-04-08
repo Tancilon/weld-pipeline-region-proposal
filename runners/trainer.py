@@ -309,6 +309,12 @@ def train_segmentation(cfg, train_loader, val_loader, seg_agent):
         seg_agent: PoseNet agent with enable_segmentation=True.
     """
     best_metrics = None
+    matched_metric_keys = {'mask_iou', 'mask_dice', 'cls_acc_matched'}
+    matched_metric_sum_keys = {
+        'mask_iou': 'mask_iou_sum',
+        'mask_dice': 'mask_dice_sum',
+        'cls_acc_matched': 'cls_acc_matched_sum',
+    }
 
     def _batch_size(batch):
         if isinstance(batch, dict):
@@ -322,27 +328,53 @@ def train_segmentation(cfg, train_loader, val_loader, seg_agent):
             return round(float(value.item()), 6)
         return round(float(value), 6)
 
+    def _scalar(value):
+        if torch.is_tensor(value):
+            return float(value.item())
+        return float(value)
+
     def _aggregate_metrics(loader):
         if loader is None:
             return None
 
         totals = {}
         total_samples = 0
+        total_matches = 0
         for val_batch in loader:
             val_batch = process_batch_seg(val_batch, cfg.device)
             batch_results = seg_agent.eval_func(val_batch, 'val', gf_mode='segmentation')
             batch_size = _batch_size(val_batch)
+            matched_count = int(_to_float(batch_results.get('matched_count', float(batch_size))))
             total_samples += batch_size
+            total_matches += matched_count
             for key, value in batch_results.items():
-                totals[key] = totals.get(key, 0.0) + _to_float(value) * batch_size
+                if key == 'matched_count' or key in matched_metric_sum_keys.values():
+                    continue
+                if key in matched_metric_keys:
+                    sum_key = matched_metric_sum_keys[key]
+                    if sum_key in batch_results:
+                        totals[key] = totals.get(key, 0.0) + _scalar(batch_results[sum_key])
+                    elif matched_count > 0:
+                        totals[key] = totals.get(key, 0.0) + _scalar(value) * matched_count
+                    continue
+
+                if batch_size == 0:
+                    continue
+                totals[key] = totals.get(key, 0.0) + _scalar(value) * batch_size
 
         if total_samples == 0:
             return None
 
-        return {
-            key: torch.tensor(value / total_samples, dtype=torch.float64)
-            for key, value in totals.items()
-        }
+        aggregated = {}
+        for key in matched_metric_keys:
+            totals.setdefault(key, 0.0)
+        for key, value in totals.items():
+            denom = total_matches if key in matched_metric_keys else total_samples
+            if denom == 0:
+                aggregated[key] = torch.tensor(0.0, dtype=torch.float64)
+            else:
+                aggregated[key] = torch.tensor(value / denom, dtype=torch.float64)
+        return aggregated
 
     def _is_better(metrics, current_best):
         if metrics is None:
@@ -364,7 +396,11 @@ def train_segmentation(cfg, train_loader, val_loader, seg_agent):
             'latest_epoch': seg_agent.clock.epoch,
             'image_size': getattr(cfg, 'img_size', None),
             'num_queries': getattr(cfg, 'num_queries', None),
-            'query_injection_layer': getattr(cfg, 'query_injection_layer', None),
+            'query_injection_layer': getattr(
+                cfg,
+                'query_inject_layer',
+                getattr(cfg, 'query_injection_layer', None),
+            ),
         }
         if latest_metrics is not None:
             summary.update({

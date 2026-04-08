@@ -6,23 +6,30 @@
 
 set -euo pipefail
 
-EXP_NAME="SegNet"
-NUCLEAR_DATA_PATH="./data/aiws5.2_nuclear_workpieces"
-POSE_INIT_CKPT=""
-WANDB_MODE="online"
-WANDB_PROJECT="nuclear-seg-single-agent"
-WANDB_ENTITY=""
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+cd "${REPO_ROOT}"
 
-BATCH_SIZE=8
-N_EPOCHS=100
-NUM_WORKERS=4
-IMG_SIZE=224
+: "${EXP_NAME:=SegNet}"
+: "${NUCLEAR_DATA_PATH:=./data/aiws5.2_nuclear_workpieces}"
+: "${POSE_INIT_CKPT:=}"
+: "${WANDB_MODE:=online}"
+: "${WANDB_PROJECT:=nuclear-seg-single-agent}"
+: "${WANDB_ENTITY:=}"
+: "${WANDB_RUN_NAME:=}"
 
-CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}" \
-WANDB_MODE="${WANDB_MODE}" \
-WANDB_PROJECT="${WANDB_PROJECT}" \
-WANDB_ENTITY="${WANDB_ENTITY}" \
+: "${BATCH_SIZE:=8}"
+: "${N_EPOCHS:=100}"
+: "${NUM_WORKERS:=4}"
+: "${IMG_SIZE:=224}"
+: "${CUDA_VISIBLE_DEVICES:=0}"
+
+export CUDA_VISIBLE_DEVICES
+
+python scripts/check_nuclear_seg_dataset.py --nuclear_data_path "${NUCLEAR_DATA_PATH}"
+
 args=(
+    python
     runners/trainer.py
     --dataset_type nuclear
     --nuclear_data_path "${NUCLEAR_DATA_PATH}"
@@ -45,11 +52,18 @@ args=(
     --num_workers "${NUM_WORKERS}"
     --wandb_mode "${WANDB_MODE}"
     --wandb_project "${WANDB_PROJECT}"
-    --wandb_entity "${WANDB_ENTITY}"
 )
 
 if [[ -n "${POSE_INIT_CKPT}" ]]; then
     args+=(--pretrained_score_model_path "${POSE_INIT_CKPT}")
 fi
 
-python "${args[@]}"
+if [[ -n "${WANDB_ENTITY}" ]]; then
+    args+=(--wandb_entity "${WANDB_ENTITY}")
+fi
+
+if [[ -n "${WANDB_RUN_NAME}" ]]; then
+    args+=(--wandb_run_name "${WANDB_RUN_NAME}")
+fi
+
+"${args[@]}"

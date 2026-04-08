@@ -19,6 +19,7 @@ SUPPORTED_CLASSES = [
     "槽钢",
     "坡口",
 ]
+ALLOWED_AUXILIARY_CLASSES = {"__background__"}
 
 
 class DatasetValidationError(RuntimeError):
@@ -30,7 +31,6 @@ class SplitSummary:
     split: str
     image_count: int
     instance_counts: Dict[str, int]
-    image_ids: set[int]
     file_names: set[str]
 
 
@@ -63,7 +63,7 @@ def _validate_categories(split: str, payload: dict) -> Dict[int, str]:
         if cat_id is None or name is None:
             _fail(f"{split}: every category needs id and name")
         category_map[int(cat_id)] = str(name)
-        if name not in SUPPORTED_CLASSES:
+        if name not in SUPPORTED_CLASSES and name not in ALLOWED_AUXILIARY_CLASSES:
             unsupported.add(str(name))
 
     if unsupported:
@@ -135,7 +135,6 @@ def _validate_split(root: Path, split: str) -> SplitSummary:
         split=split,
         image_count=len(images),
         instance_counts=image_instances,
-        image_ids=image_ids,
         file_names=file_names,
     )
 
@@ -167,22 +166,12 @@ def main(argv: list[str] | None = None) -> int:
     root = Path(args.nuclear_data_path).expanduser().resolve()
     summaries = [_validate_split(root, "train"), _validate_split(root, "val")]
 
-    train_summary, val_summary = summaries
-    errors = []
-    duplicate_ids = train_summary.image_ids & val_summary.image_ids
-    duplicate_file_names = train_summary.file_names & val_summary.file_names
-    if duplicate_ids:
-        errors.append(
-            "duplicate image id(s) across splits: "
-            + ", ".join(str(item) for item in sorted(duplicate_ids))
-        )
+    duplicate_file_names = summaries[0].file_names & summaries[1].file_names
     if duplicate_file_names:
-        errors.append(
+        _fail(
             "duplicate file name(s) across splits: "
             + ", ".join(sorted(duplicate_file_names))
         )
-    if errors:
-        _fail("; ".join(errors))
 
     print(_format_summary(summaries))
     return 0

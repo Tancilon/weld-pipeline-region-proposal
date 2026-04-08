@@ -275,6 +275,10 @@ class EoMTCriterion(nn.Module):
                 'mask_iou': zero,
                 'mask_dice': zero,
                 'cls_acc_matched': zero,
+                'mask_iou_sum': zero,
+                'mask_dice_sum': zero,
+                'cls_acc_matched_sum': zero,
+                'matched_count': zero,
             }
 
         denom = torch.tensor(float(total_matches), device=device)
@@ -282,6 +286,10 @@ class EoMTCriterion(nn.Module):
             'mask_iou': total_iou / denom,
             'mask_dice': total_dice / denom,
             'cls_acc_matched': total_cls_acc / denom,
+            'mask_iou_sum': total_iou,
+            'mask_dice_sum': total_dice,
+            'cls_acc_matched_sum': total_cls_acc,
+            'matched_count': denom,
         }
 
     def forward(self, class_logits, mask_logits, gt_classes_list, gt_masks_list):

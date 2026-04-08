@@ -152,6 +152,29 @@ def test_checker_rejects_missing_files(tmp_path):
     assert "missing image file" in result.stderr.lower()
 
 
+@pytest.mark.parametrize("missing_split", ["train", "val"])
+def test_checker_rejects_missing_required_annotation_json(tmp_path, missing_split):
+    data_path = tmp_path / "dataset"
+    annotations_dir = data_path / "annotations"
+    images_dir = data_path / "images"
+    annotations_dir.mkdir(parents=True)
+    images_dir.mkdir(parents=True)
+
+    present_split = "val" if missing_split == "train" else "train"
+    _write_coco_fixture(
+        data_path,
+        present_split,
+        f"{present_split}.png",
+        CLASS_NAMES[0],
+    )
+
+    result = _run_checker(data_path)
+
+    assert result.returncode != 0
+    assert f"missing required annotation file" in result.stderr.lower()
+    assert f"{missing_split}.json" in result.stderr
+
+
 def test_checker_rejects_invalid_category_names(tmp_path):
     data_path = tmp_path / "dataset"
     annotations_dir = data_path / "annotations"
@@ -174,7 +197,40 @@ def test_checker_rejects_invalid_category_names(tmp_path):
     assert "unsupported category" in result.stderr.lower()
 
 
-def test_checker_rejects_duplicate_ids_and_file_names_across_splits(tmp_path):
+def test_checker_allows_background_category_in_coco_metadata(tmp_path):
+    data_path = tmp_path / "dataset"
+    annotations_dir = data_path / "annotations"
+    images_dir = data_path / "images"
+    annotations_dir.mkdir(parents=True)
+    images_dir.mkdir(parents=True)
+
+    (images_dir / "train.png").write_bytes(b"")
+    (images_dir / "val.png").write_bytes(b"")
+
+    categories = [{"id": 0, "name": "__background__"}] + [
+        {"id": idx, "name": name} for idx, name in enumerate(CLASS_NAMES, start=1)
+    ]
+    train_payload = {
+        "images": [{"id": 1, "file_name": "train.png", "width": 8, "height": 8}],
+        "annotations": [],
+        "categories": categories,
+    }
+    val_payload = {
+        "images": [{"id": 2, "file_name": "val.png", "width": 8, "height": 8}],
+        "annotations": [],
+        "categories": categories,
+    }
+    (annotations_dir / "train.json").write_text(json.dumps(train_payload), encoding="utf-8")
+    (annotations_dir / "val.json").write_text(json.dumps(val_payload), encoding="utf-8")
+
+    result = _run_checker(data_path)
+
+    assert result.returncode == 0, result.stderr
+    assert "train images: 1" in result.stdout
+    assert "val images: 1" in result.stdout
+
+
+def test_checker_rejects_duplicate_file_names_across_splits(tmp_path):
     data_path = tmp_path / "dataset"
     annotations_dir = data_path / "annotations"
     images_dir = data_path / "images"
@@ -201,5 +257,35 @@ def test_checker_rejects_duplicate_ids_and_file_names_across_splits(tmp_path):
     result = _run_checker(data_path)
 
     assert result.returncode != 0
-    assert "duplicate image id" in result.stderr.lower()
     assert "duplicate file name" in result.stderr.lower()
+
+
+def test_checker_allows_duplicate_image_ids_across_splits(tmp_path):
+    data_path = tmp_path / "dataset"
+    annotations_dir = data_path / "annotations"
+    images_dir = data_path / "images"
+    annotations_dir.mkdir(parents=True)
+    images_dir.mkdir(parents=True)
+
+    for image_name in ["train_only.png", "val_only.png"]:
+        (images_dir / image_name).write_bytes(b"")
+
+    categories = [{"id": idx, "name": name} for idx, name in enumerate(CLASS_NAMES, start=1)]
+    train_payload = {
+        "images": [{"id": 1, "file_name": "train_only.png", "width": 8, "height": 8}],
+        "annotations": [],
+        "categories": categories,
+    }
+    val_payload = {
+        "images": [{"id": 1, "file_name": "val_only.png", "width": 8, "height": 8}],
+        "annotations": [],
+        "categories": categories,
+    }
+    (annotations_dir / "train.json").write_text(json.dumps(train_payload), encoding="utf-8")
+    (annotations_dir / "val.json").write_text(json.dumps(val_payload), encoding="utf-8")
+
+    result = _run_checker(data_path)
+
+    assert result.returncode == 0, result.stderr
+    assert "train images: 1" in result.stdout
+    assert "val images: 1" in result.stdout
