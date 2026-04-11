@@ -463,12 +463,7 @@ def _make_closing_segment(fitted_segments, centerline):
 def build_json_output(model_name, fitted_segments, centerline, plane,
                       force_close=False):
     """Assemble final JSON structure with 3D back-projected coordinates."""
-    closed = detect_closed(centerline)
-    if force_close and not closed:
-        fitted_segments = list(fitted_segments) + [
-            _make_closing_segment(fitted_segments, centerline)
-        ]
-        closed = True
+    closed = detect_closed(centerline) or force_close
     weld_seams = []
     for seg in fitted_segments:
         pts_2d = np.array(seg["points_2d"])
@@ -589,7 +584,12 @@ def run_pipeline(workpiece_path, weld_path, output_path=None, no_viz=False,
     centerline = extract_centerline(mesh, pts_2d)
     segments = segment_by_curvature(centerline)
     fitted = [fit_segment(seg) for seg in segments]
-    result = build_json_output(model_name, fitted, centerline, plane,
+    if force_close and not detect_closed(centerline):
+        closing = _make_closing_segment(fitted, centerline)
+        fitted_with_close = fitted + [closing]
+    else:
+        fitted_with_close = fitted
+    result = build_json_output(model_name, fitted_with_close, centerline, plane,
                                force_close=force_close)
 
     print_summary(model_name, plane["planarity"], centerline,
@@ -600,7 +600,7 @@ def run_pipeline(workpiece_path, weld_path, output_path=None, no_viz=False,
     print(f"\nJSON saved to: {output_path}")
 
     if not no_viz:
-        visualize(centerline, fitted, mesh, plane, viz_path)
+        visualize(centerline, fitted_with_close, mesh, plane, viz_path)
         print(f"Visualization saved to: {viz_path}")
 
 
