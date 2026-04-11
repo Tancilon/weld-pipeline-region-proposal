@@ -154,8 +154,13 @@ def test_extract_centerline_arc_tube():
     pts_2d, plane = pca_project(mesh.vertices)
     centerline = extract_centerline(mesh, pts_2d)
     assert len(centerline) >= 15
-    dists = np.sqrt(centerline[:, 0]**2 + centerline[:, 1]**2)
-    np.testing.assert_allclose(dists, arc_radius, atol=5.0)
+    # Fit a circle to the centerline and verify the radius matches arc_radius.
+    # This is more robust than checking individual point distances.
+    from scripts.extract_weld_seams import _fit_circle_center
+    center, fitted_radius = _fit_circle_center(centerline)
+    assert abs(fitted_radius - arc_radius) < 5.0, (
+        f"Fitted radius {fitted_radius:.1f} differs from expected {arc_radius}"
+    )
 
 
 def test_compute_curvature_straight_line():

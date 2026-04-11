@@ -124,100 +124,94 @@ def back_project(pts_2d: np.ndarray, plane: dict) -> np.ndarray:
     return plane["origin"] + pts_2d[:, 0:1] * plane["u"] + pts_2d[:, 1:2] * plane["v"]
 
 
-def _centerline_from_topology(mesh: trimesh.Trimesh, pts_2d: np.ndarray) -> np.ndarray:
-    """Extract centerline by grouping vertices into cross-sectional rings.
+def _fit_circle_center(pts_2d: np.ndarray) -> tuple[np.ndarray, float]:
+    """Fit a circle to 2D points, return (center, radius).
 
-    Projects vertices onto the first principal axis (pts_2d[:, 0]), finds gaps
-    in the sorted projection values to detect ring boundaries, takes ring
-    centroids (projected from 3D without mean-centering), orders them by
-    nearest-neighbour chain, and applies a light moving-average smoothing
-    (window 3).
+    Uses algebraic circle fit (Kasa method) which is fast and sufficient
+    for approximately circular point clouds.
+    """
+    x, y = pts_2d[:, 0], pts_2d[:, 1]
+    # Solve: x^2 + y^2 + Dx + Ey + F = 0 => [x y 1] @ [D E F]^T = -(x^2+y^2)
+    A = np.column_stack([x, y, np.ones_like(x)])
+    b = -(x ** 2 + y ** 2)
+    result, _, _, _ = np.linalg.lstsq(A, b, rcond=None)
+    D, E, F = result
+    cx, cy = -D / 2, -E / 2
+    R = np.sqrt(cx ** 2 + cy ** 2 - F)
+    return np.array([cx, cy]), R
+
+
+def _extract_centerline_by_angle(pts_2d: np.ndarray,
+                                  target_points: int = 120) -> np.ndarray:
+    """Extract centerline by sorting vertices by angle and group-averaging.
+
+    Fits a circle to the 2D points to find the best reference center,
+    sorts by angle from that center, groups consecutive vertices into
+    windows, takes window centroids, removes outliers, and smooths.
+
+    Works for any tube mesh regardless of ring size.
 
     Returns:
-        (M, 2) ordered centerline points, or raises ValueError if extraction
-        yields fewer than 3 rings.
+        (M, 2) ordered centerline points
     """
-    proj = pts_2d[:, 0]
-    order = np.argsort(proj)
-    sorted_proj = proj[order]
+    n_verts = len(pts_2d)
 
-    # Detect gaps between consecutive sorted projection values
-    steps = np.diff(sorted_proj)
-    median_step = np.median(steps[steps > 0]) if np.any(steps > 0) else 0.0
-    if median_step == 0.0:
-        raise ValueError("Cannot detect ring boundaries: zero median step")
+    # Use fitted circle center for sorting — this gives much cleaner
+    # ring separation than the centroid for curved paths
+    center, radius = _fit_circle_center(pts_2d)
 
-    gap_threshold = 3.0 * median_step
-    boundaries = np.where(steps > gap_threshold)[0] + 1  # indices where new ring starts
+    angles = np.arctan2(pts_2d[:, 1] - center[1], pts_2d[:, 0] - center[0])
+    order = np.argsort(angles)
+    sorted_pts = pts_2d[order]
 
-    # Build ring slices (indices into the original vertex array via `order`)
-    ring_slices: list[np.ndarray] = []
-    prev = 0
-    for b in boundaries:
-        ring_slices.append(order[prev:b])
-        prev = b
-    ring_slices.append(order[prev:])
+    # Window size: average enough vertices per group to smooth out
+    # cross-section variation while producing ~target_points groups
+    window = max(2, n_verts // target_points)
+    n_groups = n_verts // window
+    if n_groups < 3:
+        raise ValueError(f"Too few groups ({n_groups}) for centerline extraction")
 
-    if len(ring_slices) < 3:
-        raise ValueError(f"Only {len(ring_slices)} ring(s) detected; need >= 3")
+    centerline = np.array([
+        sorted_pts[i * window:(i + 1) * window].mean(axis=0)
+        for i in range(n_groups)
+    ])
 
-    # Recompute PCA axes (u, v) so we can project 3D ring centroids without
-    # mean-centering, preserving absolute distances from the 3D origin.
-    verts = mesh.vertices
-    _, _, Vt = np.linalg.svd(verts - verts.mean(axis=0), full_matrices=False)
-    u, v = Vt[0], Vt[1]
-    proj_matrix = np.column_stack([u, v])  # (3, 2)
+    # Remove outlier points: points whose distance from the fitted circle
+    # center deviates significantly from the fitted radius
+    if len(centerline) > 5:
+        dists_from_center = np.linalg.norm(centerline - center, axis=1)
+        keep = np.abs(dists_from_center - radius) < radius * 0.3
+        if keep.sum() >= 5:
+            centerline = centerline[keep]
 
-    # Compute 3D centroid of each ring, then project onto (u, v) without centering
-    centroids = np.array(
-        [verts[idx].mean(axis=0) @ proj_matrix for idx in ring_slices]
-    )
+    # Also remove step-distance jumps iteratively
+    for _ in range(3):
+        if len(centerline) < 5:
+            break
+        step_dists = np.linalg.norm(np.diff(centerline, axis=0), axis=1)
+        median_step = np.median(step_dists)
+        if median_step <= 0:
+            break
+        max_neighbor_step = np.zeros(len(centerline))
+        max_neighbor_step[0] = step_dists[0]
+        max_neighbor_step[-1] = step_dists[-1]
+        for i in range(1, len(centerline) - 1):
+            max_neighbor_step[i] = max(step_dists[i - 1], step_dists[i])
+        keep = max_neighbor_step < 5.0 * median_step
+        if keep.all():
+            break
+        centerline = centerline[keep]
 
-    # Order centroids by nearest-neighbour chain starting from one end
-    n = len(centroids)
-    visited = np.zeros(n, dtype=bool)
-    # Start from the centroid with the smallest first-axis value
-    start = int(np.argmin(centroids[:, 0]))
-    chain = [start]
-    visited[start] = True
-    for _ in range(n - 1):
-        cur = chain[-1]
-        dists = np.linalg.norm(centroids - centroids[cur], axis=1)
-        dists[visited] = np.inf
-        nxt = int(np.argmin(dists))
-        chain.append(nxt)
-        visited[nxt] = True
-    ordered = centroids[chain]
+    if len(centerline) < 3:
+        raise ValueError("Too few centerline points after outlier removal")
 
     # Light moving-average smoothing with window 3
-    if len(ordered) >= 3:
-        smoothed = ordered.copy()
-        smoothed[1:-1] = (ordered[:-2] + ordered[1:-1] + ordered[2:]) / 3.0
-        ordered = smoothed
+    if len(centerline) >= 5:
+        smoothed = centerline.copy()
+        smoothed[1:-1] = (centerline[:-2] + centerline[1:-1] + centerline[2:]) / 3.0
+        centerline = smoothed
 
-    return ordered
-
-
-def _centerline_fallback(pts_2d: np.ndarray, n_bins: int = 36) -> np.ndarray:
-    """Fallback centerline extraction: bin by angle from centroid, average each bin.
-
-    Returns:
-        (M, 2) centerline points (unordered, one per non-empty angular bin).
-    """
-    centroid = pts_2d.mean(axis=0)
-    centered = pts_2d - centroid
-    angles = np.arctan2(centered[:, 1], centered[:, 0])  # [-pi, pi]
-    bin_edges = np.linspace(-np.pi, np.pi, n_bins + 1)
-    bin_idx = np.digitize(angles, bin_edges) - 1
-    bin_idx = np.clip(bin_idx, 0, n_bins - 1)
-
-    centerline_pts = []
-    for b in range(n_bins):
-        mask = bin_idx == b
-        if mask.sum() > 0:
-            centerline_pts.append(pts_2d[mask].mean(axis=0))
-
-    return np.array(centerline_pts)
+    return centerline
 
 
 def compute_curvature(pts: np.ndarray) -> np.ndarray:
@@ -251,12 +245,10 @@ def segment_by_curvature(centerline: np.ndarray) -> list[dict]:
     """
     kappa = compute_curvature(centerline)
 
-    kernel_size = min(5, len(kappa))
-    if kernel_size >= 3:
-        kernel = np.ones(kernel_size) / kernel_size
-        kappa_smooth = np.convolve(kappa, kernel, mode="same")
-    else:
-        kappa_smooth = kappa
+    # Smoothing kernel: scale with centerline length for stable results
+    kernel_size = max(3, min(len(kappa) // 5, 15))
+    kernel = np.ones(kernel_size) / kernel_size
+    kappa_smooth = np.convolve(kappa, kernel, mode="same")
 
     nonzero_kappa = kappa_smooth[kappa_smooth > 1e-8]
     if len(nonzero_kappa) == 0:
@@ -277,11 +269,12 @@ def segment_by_curvature(centerline: np.ndarray) -> list[dict]:
         segments.append({"label": label, "start": i, "end": j})
         i = j
 
-    # Merge short segments (< 3 points) into neighbors
+    # Merge short segments (< 5 points) into neighbors
+    min_seg_len = max(3, len(centerline) // 20)
     merged = []
     for seg in segments:
         length = seg["end"] - seg["start"]
-        if length < 3 and merged:
+        if length < min_seg_len and merged:
             merged[-1]["end"] = seg["end"]
         else:
             merged.append(seg)
@@ -362,10 +355,7 @@ def extract_centerline(mesh: trimesh.Trimesh, pts_2d: np.ndarray) -> np.ndarray:
     Returns:
         centerline: (M, 2) ordered 2D centerline points
     """
-    try:
-        return _centerline_from_topology(mesh, pts_2d)
-    except Exception:
-        return _centerline_fallback(pts_2d)
+    return _extract_centerline_by_angle(pts_2d)
 
 
 def detect_closed(centerline: np.ndarray) -> bool:
