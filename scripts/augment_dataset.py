@@ -169,7 +169,7 @@ def augment_split(
             aug_image, polygons, bbox, area = result
 
             # Save augmented image
-            aug_filename = f"AUG_{aug_file_counter:04d}.png"
+            aug_filename = f"AUG_{split}_{aug_file_counter:04d}.png"
             aug_file_counter += 1
             aug_path = os.path.join(output_dir, 'images', aug_filename)
             cv2.imwrite(aug_path, cv2.cvtColor(aug_image, cv2.COLOR_RGB2BGR))
