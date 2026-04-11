@@ -79,6 +79,7 @@ def test_back_project_roundtrip():
     np.testing.assert_allclose(recovered, projected_orig, atol=1e-10)
 
 
+from scripts.extract_weld_seams import compute_curvature, segment_by_curvature
 from scripts.extract_weld_seams import extract_centerline
 
 
@@ -151,3 +152,47 @@ def test_extract_centerline_arc_tube():
     assert len(centerline) >= 15
     dists = np.sqrt(centerline[:, 0]**2 + centerline[:, 1]**2)
     np.testing.assert_allclose(dists, arc_radius, atol=5.0)
+
+
+def test_compute_curvature_straight_line():
+    pts = np.column_stack([np.linspace(0, 100, 50), np.zeros(50)])
+    kappa = compute_curvature(pts)
+    assert len(kappa) == 50
+    assert np.all(np.abs(kappa[1:-1]) < 1e-6)
+
+
+def test_compute_curvature_circle():
+    R = 50.0
+    theta = np.linspace(0, 2 * np.pi, 100, endpoint=False)
+    pts = np.column_stack([R * np.cos(theta), R * np.sin(theta)])
+    kappa = compute_curvature(pts)
+    np.testing.assert_allclose(kappa[2:-2], 1.0 / R, atol=0.005)
+
+
+def test_segment_by_curvature_line_only():
+    pts = np.column_stack([np.linspace(0, 100, 50), np.zeros(50)])
+    segments = segment_by_curvature(pts)
+    assert len(segments) == 1
+    assert segments[0]["type"] == "line"
+
+
+def test_segment_by_curvature_arc_only():
+    R = 50.0
+    theta = np.linspace(0, np.pi, 50)
+    pts = np.column_stack([R * np.cos(theta), R * np.sin(theta)])
+    segments = segment_by_curvature(pts)
+    assert len(segments) == 1
+    assert segments[0]["type"] == "arc"
+
+
+def test_segment_by_curvature_mixed():
+    line1 = np.column_stack([np.linspace(0, 30, 20), np.zeros(20)])
+    theta = np.linspace(-np.pi / 2, 0, 20)
+    arc = np.column_stack([30 + 20 * np.cos(theta), 20 + 20 * np.sin(theta)])
+    line2 = np.column_stack([50 * np.ones(20), np.linspace(20, 50, 20)])
+    pts = np.vstack([line1, arc[1:], line2[1:]])
+    segments = segment_by_curvature(pts)
+    types = [s["type"] for s in segments]
+    assert "line" in types
+    assert "arc" in types
+    assert len(segments) >= 2

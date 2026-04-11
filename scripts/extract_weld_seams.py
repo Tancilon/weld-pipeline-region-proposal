@@ -214,6 +214,87 @@ def _centerline_fallback(pts_2d: np.ndarray, n_bins: int = 36) -> np.ndarray:
     return np.array(centerline_pts)
 
 
+def compute_curvature(pts: np.ndarray) -> np.ndarray:
+    """Compute discrete curvature at each point using circumscribed circle.
+
+    For three consecutive points, curvature = 1/R where R is the circumradius.
+    Endpoints get the same curvature as their nearest interior neighbor.
+    """
+    n = len(pts)
+    kappa = np.zeros(n)
+    for i in range(1, n - 1):
+        a, b, c = pts[i - 1], pts[i], pts[i + 1]
+        ab = np.linalg.norm(b - a)
+        bc = np.linalg.norm(c - b)
+        ac = np.linalg.norm(c - a)
+        cross = abs((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]))
+        denom = ab * bc * ac
+        if denom < 1e-12:
+            kappa[i] = 0.0
+        else:
+            kappa[i] = 2.0 * cross / denom
+    kappa[0] = kappa[1]
+    kappa[-1] = kappa[-2]
+    return kappa
+
+
+def segment_by_curvature(centerline: np.ndarray) -> list[dict]:
+    """Segment centerline into line and arc segments based on curvature.
+
+    Returns list of dicts with: type, indices (start, end), points_2d
+    """
+    kappa = compute_curvature(centerline)
+
+    kernel_size = min(5, len(kappa))
+    if kernel_size >= 3:
+        kernel = np.ones(kernel_size) / kernel_size
+        kappa_smooth = np.convolve(kappa, kernel, mode="same")
+    else:
+        kappa_smooth = kappa
+
+    nonzero_kappa = kappa_smooth[kappa_smooth > 1e-8]
+    if len(nonzero_kappa) == 0:
+        threshold = 1e-6
+    else:
+        threshold = np.median(nonzero_kappa) * 0.3
+
+    labels = np.where(kappa_smooth < threshold, 0, 1)  # 0=line, 1=arc
+
+    # Merge contiguous same-label runs
+    segments = []
+    i = 0
+    while i < len(labels):
+        label = labels[i]
+        j = i
+        while j < len(labels) and labels[j] == label:
+            j += 1
+        segments.append({"label": label, "start": i, "end": j})
+        i = j
+
+    # Merge short segments (< 3 points) into neighbors
+    merged = []
+    for seg in segments:
+        length = seg["end"] - seg["start"]
+        if length < 3 and merged:
+            merged[-1]["end"] = seg["end"]
+        else:
+            merged.append(seg)
+
+    result = []
+    for seg in merged:
+        seg_kappa = kappa_smooth[seg["start"]:seg["end"]]
+        if len(seg_kappa) > 0 and np.median(seg_kappa) >= threshold:
+            seg_type = "arc"
+        else:
+            seg_type = "line"
+        result.append({
+            "type": seg_type,
+            "indices": (seg["start"], seg["end"]),
+            "points_2d": centerline[seg["start"]:seg["end"]],
+        })
+    return result
+
+
 def extract_centerline(mesh: trimesh.Trimesh, pts_2d: np.ndarray) -> np.ndarray:
     """Extract ordered centerline points from a structured sweep mesh.
 
