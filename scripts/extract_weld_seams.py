@@ -295,6 +295,52 @@ def segment_by_curvature(centerline: np.ndarray) -> list[dict]:
     return result
 
 
+def fit_line_error(pts: np.ndarray, p0: np.ndarray, p1: np.ndarray) -> float:
+    """Max distance from points to the line defined by p0-p1."""
+    d = p1 - p0
+    length = np.linalg.norm(d)
+    if length < 1e-12:
+        return float(np.max(np.linalg.norm(pts - p0, axis=1)))
+    diffs = pts - p0
+    cross = np.abs(diffs[:, 0] * d[1] - diffs[:, 1] * d[0])
+    return float(np.max(cross / length))
+
+
+def fit_arc_error(pts: np.ndarray, p0: np.ndarray, pm: np.ndarray, p1: np.ndarray) -> float:
+    """Max distance from points to the circular arc defined by 3 points."""
+    ax, ay = p0
+    bx, by = pm
+    cx, cy = p1
+    D = 2 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by))
+    if abs(D) < 1e-12:
+        return fit_line_error(pts, p0, p1)
+    ux = ((ax**2 + ay**2) * (by - cy) + (bx**2 + by**2) * (cy - ay) + (cx**2 + cy**2) * (ay - by)) / D
+    uy = ((ax**2 + ay**2) * (cx - bx) + (bx**2 + by**2) * (ax - cx) + (cx**2 + cy**2) * (bx - ax)) / D
+    center = np.array([ux, uy])
+    R = np.linalg.norm(p0 - center)
+    dists = np.linalg.norm(pts - center, axis=1)
+    return float(np.max(np.abs(dists - R)))
+
+
+def fit_segment(segment: dict) -> dict:
+    """Fit a segment and compute fitting error."""
+    pts = segment["points_2d"]
+    seg_type = segment["type"]
+    if seg_type == "line":
+        key_points = [pts[0], pts[-1]]
+        error = fit_line_error(pts, pts[0], pts[-1])
+    else:
+        mid_idx = len(pts) // 2
+        key_points = [pts[0], pts[mid_idx], pts[-1]]
+        error = fit_arc_error(pts, pts[0], pts[mid_idx], pts[-1])
+    return {
+        "type": seg_type,
+        "points_2d": key_points,
+        "indices": segment["indices"],
+        "fitting_error_mm": round(error, 4),
+    }
+
+
 def extract_centerline(mesh: trimesh.Trimesh, pts_2d: np.ndarray) -> np.ndarray:
     """Extract ordered centerline points from a structured sweep mesh.
 

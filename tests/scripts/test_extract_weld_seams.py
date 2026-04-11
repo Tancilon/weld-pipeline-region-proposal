@@ -80,6 +80,7 @@ def test_back_project_roundtrip():
 
 
 from scripts.extract_weld_seams import compute_curvature, segment_by_curvature
+from scripts.extract_weld_seams import fit_segment, fit_line_error, fit_arc_error
 from scripts.extract_weld_seams import extract_centerline
 
 
@@ -196,3 +197,42 @@ def test_segment_by_curvature_mixed():
     assert "line" in types
     assert "arc" in types
     assert len(segments) >= 2
+
+
+def test_fit_segment_line():
+    pts_2d = np.column_stack([np.linspace(0, 100, 30), np.linspace(0, 50, 30)])
+    seg = {"type": "line", "indices": (0, 30), "points_2d": pts_2d}
+    result = fit_segment(seg)
+    assert result["type"] == "line"
+    assert len(result["points_2d"]) == 2
+    np.testing.assert_allclose(result["points_2d"][0], pts_2d[0], atol=1e-10)
+    np.testing.assert_allclose(result["points_2d"][1], pts_2d[-1], atol=1e-10)
+    assert result["fitting_error_mm"] < 1e-10
+
+
+def test_fit_segment_arc():
+    R = 40.0
+    theta = np.linspace(0, np.pi / 2, 30)
+    pts_2d = np.column_stack([R * np.cos(theta), R * np.sin(theta)])
+    seg = {"type": "arc", "indices": (0, 30), "points_2d": pts_2d}
+    result = fit_segment(seg)
+    assert result["type"] == "arc"
+    assert len(result["points_2d"]) == 3
+    np.testing.assert_allclose(result["points_2d"][0], pts_2d[0], atol=1e-10)
+    np.testing.assert_allclose(result["points_2d"][2], pts_2d[-1], atol=1e-10)
+    assert result["fitting_error_mm"] < 1.0
+
+
+def test_fit_line_error_perfect():
+    pts = np.column_stack([np.linspace(0, 10, 20), np.linspace(0, 5, 20)])
+    error = fit_line_error(pts, pts[0], pts[-1])
+    assert error < 1e-10
+
+
+def test_fit_arc_error_perfect_circle():
+    R = 30.0
+    theta = np.linspace(0, np.pi, 50)
+    pts = np.column_stack([R * np.cos(theta), R * np.sin(theta)])
+    p0, pm, p1 = pts[0], pts[len(pts) // 2], pts[-1]
+    error = fit_arc_error(pts, p0, pm, p1)
+    assert error < 0.5
