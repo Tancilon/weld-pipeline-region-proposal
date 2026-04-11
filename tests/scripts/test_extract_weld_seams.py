@@ -1,3 +1,5 @@
+import json
+
 import numpy as np
 import pytest
 import trimesh
@@ -82,6 +84,7 @@ def test_back_project_roundtrip():
 from scripts.extract_weld_seams import compute_curvature, segment_by_curvature
 from scripts.extract_weld_seams import fit_segment, fit_line_error, fit_arc_error
 from scripts.extract_weld_seams import extract_centerline
+from scripts.extract_weld_seams import detect_closed, build_json_output
 
 
 def _make_tube_mesh(n_rings=20, n_per_ring=8, radius=2.0, length=100.0):
@@ -236,3 +239,50 @@ def test_fit_arc_error_perfect_circle():
     p0, pm, p1 = pts[0], pts[len(pts) // 2], pts[-1]
     error = fit_arc_error(pts, p0, pm, p1)
     assert error < 0.5
+
+
+def test_detect_closed_true():
+    theta = np.linspace(0, 2 * np.pi, 100, endpoint=True)
+    pts = np.column_stack([np.cos(theta), np.sin(theta)]) * 50
+    assert detect_closed(pts) is True
+
+
+def test_detect_closed_false():
+    theta = np.linspace(0, np.pi, 50)
+    pts = np.column_stack([np.cos(theta), np.sin(theta)]) * 50
+    assert detect_closed(pts) is False
+
+
+def test_build_json_output():
+    plane = {
+        "origin": np.array([0.0, 0.0, 0.0]),
+        "u": np.array([1.0, 0.0, 0.0]),
+        "v": np.array([0.0, 1.0, 0.0]),
+        "n": np.array([0.0, 0.0, 1.0]),
+        "planarity": 0.99,
+    }
+    fitted = [
+        {
+            "type": "line",
+            "points_2d": [np.array([0.0, 0.0]), np.array([10.0, 0.0])],
+            "fitting_error_mm": 0.1,
+        },
+        {
+            "type": "arc",
+            "points_2d": [np.array([10.0, 0.0]), np.array([15.0, 5.0]), np.array([20.0, 0.0])],
+            "fitting_error_mm": 0.3,
+        },
+    ]
+    centerline = np.array([[0, 0], [5, 0], [10, 0], [15, 5], [20, 0]])
+    result = build_json_output("工件1", fitted, centerline, plane)
+    assert result["model"] == "工件1"
+    assert result["coord_system"] == "raw"
+    assert isinstance(result["closed"], bool)
+    assert len(result["weld_seams"]) == 2
+    line_pts = result["weld_seams"][0]["points"]
+    assert len(line_pts) == 2
+    assert len(line_pts[0]) == 3
+    arc_pts = result["weld_seams"][1]["points"]
+    assert len(arc_pts) == 3
+    json_str = json.dumps(result, ensure_ascii=False)
+    assert "工件1" in json_str

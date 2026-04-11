@@ -1,8 +1,14 @@
 """Extract weld seam centerlines from OBJ meshes and fit as line/arc sequences."""
 
+import argparse
+import json
+import os
 import warnings
 from pathlib import Path
 
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import numpy as np
 import trimesh
 
@@ -360,3 +366,162 @@ def extract_centerline(mesh: trimesh.Trimesh, pts_2d: np.ndarray) -> np.ndarray:
         return _centerline_from_topology(mesh, pts_2d)
     except Exception:
         return _centerline_fallback(pts_2d)
+
+
+def detect_closed(centerline: np.ndarray) -> bool:
+    """Check if centerline forms a closed path. Closed if gap < 2% of total length."""
+    diffs = np.diff(centerline, axis=0)
+    total_length = np.sum(np.linalg.norm(diffs, axis=1))
+    gap = np.linalg.norm(centerline[-1] - centerline[0])
+    return bool(gap < total_length * 0.02)
+
+
+def build_json_output(model_name, fitted_segments, centerline, plane):
+    """Assemble final JSON structure with 3D back-projected coordinates."""
+    closed = detect_closed(centerline)
+    weld_seams = []
+    for seg in fitted_segments:
+        pts_2d = np.array(seg["points_2d"])
+        pts_3d = back_project(pts_2d, plane)
+        weld_seams.append({
+            "type": seg["type"],
+            "points": [[round(c, 6) for c in pt] for pt in pts_3d.tolist()],
+            "fitting_error_mm": seg["fitting_error_mm"],
+        })
+    return {
+        "model": model_name,
+        "coord_system": "raw",
+        "closed": closed,
+        "weld_seams": weld_seams,
+    }
+
+
+def _interpolate_arc_2d(p0, pm, p1, n=50):
+    """Interpolate n points along circular arc through p0, pm, p1."""
+    ax, ay = p0
+    bx, by = pm
+    cx, cy = p1
+    D = 2 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by))
+    if abs(D) < 1e-12:
+        return np.column_stack([np.linspace(p0[0], p1[0], n), np.linspace(p0[1], p1[1], n)])
+    ux = ((ax**2 + ay**2) * (by - cy) + (bx**2 + by**2) * (cy - ay) + (cx**2 + cy**2) * (ay - by)) / D
+    uy = ((ax**2 + ay**2) * (cx - bx) + (bx**2 + by**2) * (ax - cx) + (cx**2 + cy**2) * (bx - ax)) / D
+    center = np.array([ux, uy])
+    a0 = np.arctan2(p0[1] - uy, p0[0] - ux)
+    am = np.arctan2(pm[1] - uy, pm[0] - ux)
+    a1 = np.arctan2(p1[1] - uy, p1[0] - ux)
+
+    def _unwrap(start, mid, end):
+        mid_adj = (mid - start) % (2 * np.pi)
+        end_adj = (end - start) % (2 * np.pi)
+        if mid_adj > end_adj:
+            end_adj += 2 * np.pi
+        return start, start + mid_adj, start + end_adj
+
+    a0, am, a1 = _unwrap(a0, am, a1)
+    R = np.linalg.norm(p0 - center)
+    angles = np.linspace(a0, a1, n)
+    return np.column_stack([ux + R * np.cos(angles), uy + R * np.sin(angles)])
+
+
+def visualize(centerline_2d, fitted_segments, mesh, plane, output_path):
+    """Generate comparison plot: 2D fit overlay + 3D mesh with fitted path."""
+    fig = plt.figure(figsize=(16, 7))
+
+    # Left: 2D centerline vs fit
+    ax1 = fig.add_subplot(121)
+    ax1.plot(centerline_2d[:, 0], centerline_2d[:, 1], '-', color='gray',
+             linewidth=1, alpha=0.6, label='Centerline')
+    for seg in fitted_segments:
+        pts = np.array(seg["points_2d"])
+        if seg["type"] == "line":
+            ax1.plot(pts[:, 0], pts[:, 1], 'b-', linewidth=2.5)
+            ax1.plot(pts[:, 0], pts[:, 1], 'go', markersize=6)
+        else:
+            arc_pts = _interpolate_arc_2d(pts[0], pts[1], pts[2], n=50)
+            ax1.plot(arc_pts[:, 0], arc_pts[:, 1], 'r-', linewidth=2.5)
+            ax1.plot(pts[:, 0], pts[:, 1], 'go', markersize=6)
+        mid = pts[len(pts) // 2]
+        ax1.annotate(f'{seg["fitting_error_mm"]:.2f}mm', xy=mid, fontsize=8,
+                     color='darkred', textcoords="offset points", xytext=(5, 5))
+    ax1.set_xlabel('u (mm)')
+    ax1.set_ylabel('v (mm)')
+    ax1.set_title('2D Centerline vs Fitted Segments')
+    ax1.set_aspect('equal')
+    ax1.legend(fontsize=8)
+    ax1.grid(True, alpha=0.3)
+
+    # Right: 3D view
+    ax2 = fig.add_subplot(122, projection='3d')
+    verts = mesh.vertices
+    ax2.plot_trisurf(verts[:, 0], verts[:, 1], verts[:, 2],
+                     triangles=mesh.faces, alpha=0.2, color='gray', edgecolor='none')
+    for seg in fitted_segments:
+        pts_2d = np.array(seg["points_2d"])
+        if seg["type"] == "line":
+            pts_3d = back_project(pts_2d, plane)
+            ax2.plot(pts_3d[:, 0], pts_3d[:, 1], pts_3d[:, 2], 'b-', linewidth=2.5)
+        else:
+            arc_2d = _interpolate_arc_2d(pts_2d[0], pts_2d[1], pts_2d[2], n=50)
+            arc_3d = back_project(arc_2d, plane)
+            ax2.plot(arc_3d[:, 0], arc_3d[:, 1], arc_3d[:, 2], 'r-', linewidth=2.5)
+    ax2.set_xlabel('X (mm)')
+    ax2.set_ylabel('Y (mm)')
+    ax2.set_zlabel('Z (mm)')
+    ax2.set_title('3D Mesh + Fitted Path')
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.close()
+
+
+def print_summary(model_name, planarity, centerline, fitted_segments, closed):
+    n_line = sum(1 for s in fitted_segments if s["type"] == "line")
+    n_arc = sum(1 for s in fitted_segments if s["type"] == "arc")
+    max_err = max(s["fitting_error_mm"] for s in fitted_segments) if fitted_segments else 0
+    print(f"Weld seam analysis: {model_name}")
+    print(f"  Planarity: {planarity:.1%} ({'OK' if planarity >= 0.95 else 'WARNING'})")
+    print(f"  Centerline points: {len(centerline)}")
+    print(f"  Segments: {len(fitted_segments)} ({n_line} line, {n_arc} arc)")
+    print(f"  Max fitting error: {max_err:.2f} mm")
+    print(f"  Closed: {closed}")
+
+
+def run_pipeline(workpiece_path, weld_path, output_path=None, no_viz=False):
+    model_name = extract_model_name(workpiece_path)
+    if output_path is None:
+        out_dir = os.path.dirname(workpiece_path) or "."
+        output_path = os.path.join(out_dir, f"{model_name}_weld_seams.json")
+    viz_path = output_path.replace(".json", "_fit.png")
+
+    mesh = load_weld_mesh(weld_path)
+    pts_2d, plane = pca_project(mesh.vertices)
+    centerline = extract_centerline(mesh, pts_2d)
+    segments = segment_by_curvature(centerline)
+    fitted = [fit_segment(seg) for seg in segments]
+    result = build_json_output(model_name, fitted, centerline, plane)
+
+    print_summary(model_name, plane["planarity"], centerline, fitted, result["closed"])
+
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(result, f, ensure_ascii=False, indent=2)
+    print(f"\nJSON saved to: {output_path}")
+
+    if not no_viz:
+        visualize(centerline, fitted, mesh, plane, viz_path)
+        print(f"Visualization saved to: {viz_path}")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Extract weld seam centerlines from OBJ mesh and fit as line/arc segments."
+    )
+    parser.add_argument("--workpiece", required=True, help="Path to workpiece OBJ file")
+    parser.add_argument("--weld", required=True, help="Path to weld seam OBJ file")
+    parser.add_argument("--output", default=None, help="JSON output path (default: auto)")
+    parser.add_argument("--no-viz", action="store_true", help="Skip visualization")
+    args = parser.parse_args()
+    run_pipeline(args.workpiece, args.weld, args.output, args.no_viz)
+
+
+if __name__ == "__main__":
+    main()
