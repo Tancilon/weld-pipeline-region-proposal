@@ -446,9 +446,29 @@ def detect_closed(centerline: np.ndarray) -> bool:
     return bool(gap < total_length * 0.02)
 
 
-def build_json_output(model_name, fitted_segments, centerline, plane):
+def _make_closing_segment(fitted_segments, centerline):
+    """Create a closing segment (line) from the last endpoint to the first."""
+    last_seg = fitted_segments[-1]
+    first_seg = fitted_segments[0]
+    p_end = np.array(last_seg["points_2d"][-1])
+    p_start = np.array(first_seg["points_2d"][0])
+    return {
+        "type": "line",
+        "points_2d": [p_end, p_start],
+        "indices": (len(centerline) - 1, 0),
+        "fitting_error_mm": 0.0,
+    }
+
+
+def build_json_output(model_name, fitted_segments, centerline, plane,
+                      force_close=False):
     """Assemble final JSON structure with 3D back-projected coordinates."""
     closed = detect_closed(centerline)
+    if force_close and not closed:
+        fitted_segments = list(fitted_segments) + [
+            _make_closing_segment(fitted_segments, centerline)
+        ]
+        closed = True
     weld_seams = []
     for seg in fitted_segments:
         pts_2d = np.array(seg["points_2d"])
@@ -556,7 +576,8 @@ def print_summary(model_name, planarity, centerline, fitted_segments, closed):
     print(f"  Closed: {closed}")
 
 
-def run_pipeline(workpiece_path, weld_path, output_path=None, no_viz=False):
+def run_pipeline(workpiece_path, weld_path, output_path=None, no_viz=False,
+                 force_close=False):
     model_name = extract_model_name(workpiece_path)
     if output_path is None:
         out_dir = os.path.dirname(workpiece_path) or "."
@@ -568,9 +589,11 @@ def run_pipeline(workpiece_path, weld_path, output_path=None, no_viz=False):
     centerline = extract_centerline(mesh, pts_2d)
     segments = segment_by_curvature(centerline)
     fitted = [fit_segment(seg) for seg in segments]
-    result = build_json_output(model_name, fitted, centerline, plane)
+    result = build_json_output(model_name, fitted, centerline, plane,
+                               force_close=force_close)
 
-    print_summary(model_name, plane["planarity"], centerline, fitted, result["closed"])
+    print_summary(model_name, plane["planarity"], centerline,
+                  result["weld_seams"], result["closed"])
 
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
@@ -589,8 +612,11 @@ def main():
     parser.add_argument("--weld", required=True, help="Path to weld seam OBJ file")
     parser.add_argument("--output", default=None, help="JSON output path (default: auto)")
     parser.add_argument("--no-viz", action="store_true", help="Skip visualization")
+    parser.add_argument("--force-close", action="store_true",
+                        help="Force closed path by adding a closing line segment")
     args = parser.parse_args()
-    run_pipeline(args.workpiece, args.weld, args.output, args.no_viz)
+    run_pipeline(args.workpiece, args.weld, args.output, args.no_viz,
+                 args.force_close)
 
 
 if __name__ == "__main__":
