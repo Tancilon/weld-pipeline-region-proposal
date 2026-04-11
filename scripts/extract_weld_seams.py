@@ -137,7 +137,13 @@ def _fit_circle_center(pts_2d: np.ndarray) -> tuple[np.ndarray, float]:
     result, _, _, _ = np.linalg.lstsq(A, b, rcond=None)
     D, E, F = result
     cx, cy = -D / 2, -E / 2
-    R = np.sqrt(cx ** 2 + cy ** 2 - F)
+    val = cx ** 2 + cy ** 2 - F
+    R = np.sqrt(max(val, 0.0))
+    if R < 1e-12:
+        # Degenerate fit (e.g. collinear points): fall back to centroid
+        center = pts_2d.mean(axis=0)
+        R = np.max(np.linalg.norm(pts_2d - center, axis=1))
+        return center, R
     return np.array([cx, cy]), R
 
 
@@ -178,7 +184,7 @@ def _extract_centerline_by_angle(pts_2d: np.ndarray,
 
     # Remove outlier points: points whose distance from the fitted circle
     # center deviates significantly from the fitted radius
-    if len(centerline) > 5:
+    if len(centerline) > 5 and np.isfinite(radius) and radius > 1e-12:
         dists_from_center = np.linalg.norm(centerline - center, axis=1)
         keep = np.abs(dists_from_center - radius) < radius * 0.3
         if keep.sum() >= 5:
@@ -341,15 +347,13 @@ def fit_segment(segment: dict) -> dict:
 
 
 def extract_centerline(mesh: trimesh.Trimesh, pts_2d: np.ndarray) -> np.ndarray:
-    """Extract ordered centerline points from a structured sweep mesh.
+    """Extract ordered centerline from PCA-projected weld seam vertices.
 
-    Uses mesh topology to identify cross-sectional rings, then takes
-    ring centroids as centerline points.
-
-    Falls back to boundary-averaging if topology analysis fails.
+    Fits a circle to find a reference center, sorts vertices by angle,
+    groups into windows, and smooths to produce an ordered centerline.
 
     Args:
-        mesh: the weld seam trimesh
+        mesh: the weld seam trimesh (reserved for future topology-based methods)
         pts_2d: (N, 2) PCA-projected vertex coordinates
 
     Returns:

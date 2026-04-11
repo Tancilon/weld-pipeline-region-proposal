@@ -62,10 +62,11 @@ def test_pca_project_planar_points():
     assert plane["planarity"] > 0.95
 
 
-def test_pca_project_warns_non_planar(capsys):
+def test_pca_project_warns_non_planar():
     rng = np.random.default_rng(42)
     points_3d = rng.uniform(-50, 50, (100, 3))
-    pts_2d, plane = pca_project(points_3d)
+    with pytest.warns(UserWarning, match="planarity"):
+        pts_2d, plane = pca_project(points_3d)
     assert plane["planarity"] < 0.95
 
 
