@@ -1,8 +1,16 @@
 """Offline data augmentation for AIWS5.2 COCO segmentation dataset."""
 
+import json
+import logging
+import os
+import shutil
+
 import cv2
 import numpy as np
 import albumentations as A
+from pycocotools.coco import COCO
+
+logger = logging.getLogger(__name__)
 
 
 def mask_to_polygons(mask: np.ndarray, min_area: float = 50.0) -> list[list[float]]:
@@ -87,3 +95,180 @@ def augment_single_image(
         if is_augmentation_safe(area, original_area, min_ratio=min_area_ratio):
             return aug_image, polygons, bbox, area
     return None
+
+
+def augment_split(
+    input_dir: str,
+    output_dir: str,
+    split: str,
+    num_aug: int,
+    seed: int,
+) -> None:
+    import random
+    random.seed(seed)
+    np.random.seed(seed)
+
+    ann_path = os.path.join(input_dir, 'annotations', f'{split}.json')
+    with open(ann_path) as f:
+        coco_data = json.load(f)
+
+    coco = COCO(ann_path)
+
+    os.makedirs(os.path.join(output_dir, 'annotations'), exist_ok=True)
+    os.makedirs(os.path.join(output_dir, 'images'), exist_ok=True)
+
+    # Copy original images
+    for img_info in coco_data['images']:
+        src = os.path.join(input_dir, 'images', img_info['file_name'])
+        dst = os.path.join(output_dir, 'images', img_info['file_name'])
+        if os.path.exists(src):
+            shutil.copy2(src, dst)
+
+    # Determine image dimensions from first image
+    first_img = coco_data['images'][0]
+    height, width = first_img['height'], first_img['width']
+    transform = build_transform(height=height, width=width)
+
+    aug_images = []
+    aug_annotations = []
+    aug_img_id = 100000
+    aug_ann_id = 100000
+    aug_file_counter = 0
+
+    total = len(coco_data['images'])
+    for idx, img_info in enumerate(coco_data['images']):
+        img_id = img_info['id']
+        img_path = os.path.join(input_dir, 'images', img_info['file_name'])
+        image = cv2.imread(img_path)
+        if image is None:
+            logger.warning(f"Could not read image: {img_path}, skipping.")
+            continue
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+        # Get annotation for this image (exactly one per image)
+        ann_ids = coco.getAnnIds(imgIds=img_id)
+        if not ann_ids:
+            logger.warning(f"No annotation for image_id={img_id}, skipping.")
+            continue
+        ann = coco.loadAnns(ann_ids)[0]
+        mask = coco.annToMask(ann)
+        original_area = ann['area']
+
+        for aug_idx in range(num_aug):
+            result = augment_single_image(
+                image, mask, original_area, transform,
+                max_retries=5, min_area_ratio=0.1,
+            )
+            if result is None:
+                logger.warning(
+                    f"[{split}] Failed to augment image_id={img_id} "
+                    f"(slot {aug_idx+1}/{num_aug}) after max retries, skipping."
+                )
+                continue
+
+            aug_image, polygons, bbox, area = result
+
+            # Save augmented image
+            aug_filename = f"AUG_{aug_file_counter:04d}.png"
+            aug_file_counter += 1
+            aug_path = os.path.join(output_dir, 'images', aug_filename)
+            cv2.imwrite(aug_path, cv2.cvtColor(aug_image, cv2.COLOR_RGB2BGR))
+
+            # Create image entry
+            aug_images.append({
+                'license': img_info.get('license', ''),
+                'url': '',
+                'file_name': aug_filename,
+                'height': height,
+                'width': width,
+                'date_captured': '',
+                'id': aug_img_id,
+            })
+
+            # Create annotation entry
+            aug_annotations.append({
+                'iscrowd': False,
+                'image_id': aug_img_id,
+                'image_name': aug_filename,
+                'category_id': ann['category_id'],
+                'id': aug_ann_id,
+                'segmentation': polygons,
+                'area': area,
+                'bbox': bbox,
+                'source_image_id': img_id,
+            })
+
+            aug_img_id += 1
+            aug_ann_id += 1
+
+        if (idx + 1) % 50 == 0 or (idx + 1) == total:
+            logger.info(f"[{split}] Processed {idx+1}/{total} images, "
+                        f"generated {aug_file_counter} augmented images so far.")
+
+    # Merge original + augmented
+    merged = {
+        'info': coco_data.get('info', {}),
+        'licenses': coco_data.get('licenses', []),
+        'categories': coco_data['categories'],
+        'images': coco_data['images'] + aug_images,
+        'annotations': coco_data['annotations'] + aug_annotations,
+    }
+
+    out_ann_path = os.path.join(output_dir, 'annotations', f'{split}.json')
+    with open(out_ann_path, 'w') as f:
+        json.dump(merged, f, ensure_ascii=False, indent=2)
+
+    logger.info(
+        f"[{split}] Done. Original: {len(coco_data['images'])}, "
+        f"Augmented: {len(aug_images)}, "
+        f"Total: {len(merged['images'])} images."
+    )
+
+
+def main():
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Offline data augmentation for COCO segmentation datasets."
+    )
+    parser.add_argument(
+        '--input_dir', type=str, required=True,
+        help='Path to input dataset (must contain annotations/ and images/).',
+    )
+    parser.add_argument(
+        '--output_dir', type=str, required=True,
+        help='Path to output augmented dataset.',
+    )
+    parser.add_argument(
+        '--num_aug', type=int, default=3,
+        help='Number of augmented images per original image (default: 3).',
+    )
+    parser.add_argument(
+        '--seed', type=int, default=42,
+        help='Random seed for reproducibility (default: 42).',
+    )
+    args = parser.parse_args()
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s [%(levelname)s] %(message)s',
+    )
+
+    for split in ['train', 'val']:
+        ann_path = os.path.join(args.input_dir, 'annotations', f'{split}.json')
+        if not os.path.exists(ann_path):
+            logger.warning(f"Annotation file not found: {ann_path}, skipping {split}.")
+            continue
+        augment_split(
+            input_dir=args.input_dir,
+            output_dir=args.output_dir,
+            split=split,
+            num_aug=args.num_aug,
+            seed=args.seed,
+        )
+
+    logger.info("Augmentation complete.")
+
+
+if __name__ == '__main__':
+    main()
