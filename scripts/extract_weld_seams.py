@@ -147,13 +147,37 @@ def _fit_circle_center(pts_2d: np.ndarray) -> tuple[np.ndarray, float]:
     return np.array([cx, cy]), R
 
 
+def _resample_by_arclength(pts: np.ndarray, target_points: int) -> np.ndarray:
+    """Resample an ordered point sequence to uniform arc-length spacing."""
+    diffs = np.diff(pts, axis=0)
+    seg_lengths = np.linalg.norm(diffs, axis=1)
+    cum_length = np.concatenate([[0.0], np.cumsum(seg_lengths)])
+    total_length = cum_length[-1]
+    if total_length < 1e-12:
+        return pts
+
+    target_dists = np.linspace(0, total_length, target_points)
+    resampled = np.empty((target_points, 2))
+    for i, d in enumerate(target_dists):
+        idx = np.searchsorted(cum_length, d, side="right") - 1
+        idx = np.clip(idx, 0, len(pts) - 2)
+        seg_len = seg_lengths[idx]
+        if seg_len < 1e-12:
+            resampled[i] = pts[idx]
+        else:
+            t = (d - cum_length[idx]) / seg_len
+            resampled[i] = pts[idx] * (1 - t) + pts[idx + 1] * t
+    return resampled
+
+
 def _extract_centerline_by_angle(pts_2d: np.ndarray,
                                   target_points: int = 120) -> np.ndarray:
     """Extract centerline by sorting vertices by angle and group-averaging.
 
     Fits a circle to the 2D points to find the best reference center,
     sorts by angle from that center, groups consecutive vertices into
-    windows, takes window centroids, removes outliers, and smooths.
+    windows, takes window centroids, removes outliers, and resamples
+    to uniform arc-length spacing.
 
     Works for any tube mesh regardless of ring size.
 
@@ -217,6 +241,21 @@ def _extract_centerline_by_angle(pts_2d: np.ndarray,
         smoothed[1:-1] = (centerline[:-2] + centerline[1:-1] + centerline[2:]) / 3.0
         centerline = smoothed
 
+    # Resample to uniform arc-length spacing via interpolation.
+    # Angle-based grouping produces uneven spacing: dense on arcs, sparse
+    # on straights. Uniform spacing ensures curvature analysis can detect
+    # line/arc transitions reliably.
+    # Check if the bulk spacing is uneven (p75/p25 ratio of step sizes).
+    # Ignore endpoint outliers by using percentiles instead of max.
+    step_sizes = np.linalg.norm(np.diff(centerline, axis=0), axis=1)
+    if len(step_sizes) > 10:
+        p25 = np.percentile(step_sizes, 25)
+        p75 = np.percentile(step_sizes, 75)
+        iqr_ratio = p75 / max(p25, 1e-12)
+        if iqr_ratio > 3.0:
+            resample_n = max(target_points * 2, len(centerline) * 2)
+            centerline = _resample_by_arclength(centerline, resample_n)
+
     return centerline
 
 
@@ -251,16 +290,32 @@ def segment_by_curvature(centerline: np.ndarray) -> list[dict]:
     """
     kappa = compute_curvature(centerline)
 
-    # Smoothing kernel: scale with centerline length for stable results
-    kernel_size = max(3, min(len(kappa) // 5, 15))
+    # Smoothing kernel: small enough to preserve line/arc transitions
+    kernel_size = max(3, min(len(kappa) // 10, 7))
     kernel = np.ones(kernel_size) / kernel_size
     kappa_smooth = np.convolve(kappa, kernel, mode="same")
 
+    # Threshold: find natural gap between line (low κ) and arc (high κ).
+    # Sort unique curvature values and look for the largest relative jump.
+    # If curvature is uniform (all line or all arc), fall back to median * 0.5.
     nonzero_kappa = kappa_smooth[kappa_smooth > 1e-8]
     if len(nonzero_kappa) == 0:
         threshold = 1e-6
     else:
-        threshold = np.median(nonzero_kappa) * 0.3
+        sorted_k = np.sort(nonzero_kappa)
+        if len(sorted_k) >= 4:
+            # Look for largest relative gap in curvature values
+            ratios = sorted_k[1:] / np.maximum(sorted_k[:-1], 1e-12)
+            best_gap_idx = np.argmax(ratios)
+            best_ratio = ratios[best_gap_idx]
+            # Only use gap threshold if the jump is significant (> 3x)
+            if best_ratio > 3.0:
+                threshold = (sorted_k[best_gap_idx] + sorted_k[best_gap_idx + 1]) / 2
+            else:
+                # Uniform curvature: use median * 0.5
+                threshold = np.median(nonzero_kappa) * 0.5
+        else:
+            threshold = np.median(nonzero_kappa) * 0.5
 
     labels = np.where(kappa_smooth < threshold, 0, 1)  # 0=line, 1=arc
 
@@ -275,23 +330,44 @@ def segment_by_curvature(centerline: np.ndarray) -> list[dict]:
         segments.append({"label": label, "start": i, "end": j})
         i = j
 
-    # Merge short segments (< 5 points) into neighbors
-    min_seg_len = max(3, len(centerline) // 20)
-    merged = []
-    for seg in segments:
-        length = seg["end"] - seg["start"]
-        if length < min_seg_len and merged:
+    # Merge short segments into the neighbor with the same label.
+    # If both neighbors differ, merge into the one whose median curvature
+    # is closer to this segment's median curvature.
+    min_seg_len = max(3, len(centerline) // 40)
+    changed = True
+    while changed:
+        changed = False
+        new_segments = []
+        for seg in segments:
+            length = seg["end"] - seg["start"]
+            if length < min_seg_len and new_segments:
+                prev = new_segments[-1]
+                if prev["label"] == seg["label"]:
+                    # Same type: just extend
+                    prev["end"] = seg["end"]
+                    changed = True
+                else:
+                    # Different type: merge into previous (will re-evaluate)
+                    prev["end"] = seg["end"]
+                    # Re-classify merged segment by median curvature
+                    merged_kappa = kappa_smooth[prev["start"]:prev["end"]]
+                    prev["label"] = 1 if np.median(merged_kappa) >= threshold else 0
+                    changed = True
+            else:
+                new_segments.append(seg)
+        segments = new_segments
+
+    # Second pass: merge adjacent segments of the same type
+    merged = [segments[0]]
+    for seg in segments[1:]:
+        if seg["label"] == merged[-1]["label"]:
             merged[-1]["end"] = seg["end"]
         else:
             merged.append(seg)
 
     result = []
     for seg in merged:
-        seg_kappa = kappa_smooth[seg["start"]:seg["end"]]
-        if len(seg_kappa) > 0 and np.median(seg_kappa) >= threshold:
-            seg_type = "arc"
-        else:
-            seg_type = "line"
+        seg_type = "arc" if seg["label"] == 1 else "line"
         result.append({
             "type": seg_type,
             "indices": (seg["start"], seg["end"]),
