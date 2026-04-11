@@ -116,3 +116,120 @@ def pca_project(vertices: np.ndarray) -> tuple[np.ndarray, dict]:
 def back_project(pts_2d: np.ndarray, plane: dict) -> np.ndarray:
     """Map 2D plane coordinates back to 3D."""
     return plane["origin"] + pts_2d[:, 0:1] * plane["u"] + pts_2d[:, 1:2] * plane["v"]
+
+
+def _centerline_from_topology(mesh: trimesh.Trimesh, pts_2d: np.ndarray) -> np.ndarray:
+    """Extract centerline by grouping vertices into cross-sectional rings.
+
+    Projects vertices onto the first principal axis (pts_2d[:, 0]), finds gaps
+    in the sorted projection values to detect ring boundaries, takes ring
+    centroids (projected from 3D without mean-centering), orders them by
+    nearest-neighbour chain, and applies a light moving-average smoothing
+    (window 3).
+
+    Returns:
+        (M, 2) ordered centerline points, or raises ValueError if extraction
+        yields fewer than 3 rings.
+    """
+    proj = pts_2d[:, 0]
+    order = np.argsort(proj)
+    sorted_proj = proj[order]
+
+    # Detect gaps between consecutive sorted projection values
+    steps = np.diff(sorted_proj)
+    median_step = np.median(steps[steps > 0]) if np.any(steps > 0) else 0.0
+    if median_step == 0.0:
+        raise ValueError("Cannot detect ring boundaries: zero median step")
+
+    gap_threshold = 3.0 * median_step
+    boundaries = np.where(steps > gap_threshold)[0] + 1  # indices where new ring starts
+
+    # Build ring slices (indices into the original vertex array via `order`)
+    ring_slices: list[np.ndarray] = []
+    prev = 0
+    for b in boundaries:
+        ring_slices.append(order[prev:b])
+        prev = b
+    ring_slices.append(order[prev:])
+
+    if len(ring_slices) < 3:
+        raise ValueError(f"Only {len(ring_slices)} ring(s) detected; need >= 3")
+
+    # Recompute PCA axes (u, v) so we can project 3D ring centroids without
+    # mean-centering, preserving absolute distances from the 3D origin.
+    verts = mesh.vertices
+    _, _, Vt = np.linalg.svd(verts - verts.mean(axis=0), full_matrices=False)
+    u, v = Vt[0], Vt[1]
+    proj_matrix = np.column_stack([u, v])  # (3, 2)
+
+    # Compute 3D centroid of each ring, then project onto (u, v) without centering
+    centroids = np.array(
+        [verts[idx].mean(axis=0) @ proj_matrix for idx in ring_slices]
+    )
+
+    # Order centroids by nearest-neighbour chain starting from one end
+    n = len(centroids)
+    visited = np.zeros(n, dtype=bool)
+    # Start from the centroid with the smallest first-axis value
+    start = int(np.argmin(centroids[:, 0]))
+    chain = [start]
+    visited[start] = True
+    for _ in range(n - 1):
+        cur = chain[-1]
+        dists = np.linalg.norm(centroids - centroids[cur], axis=1)
+        dists[visited] = np.inf
+        nxt = int(np.argmin(dists))
+        chain.append(nxt)
+        visited[nxt] = True
+    ordered = centroids[chain]
+
+    # Light moving-average smoothing with window 3
+    if len(ordered) >= 3:
+        smoothed = ordered.copy()
+        smoothed[1:-1] = (ordered[:-2] + ordered[1:-1] + ordered[2:]) / 3.0
+        ordered = smoothed
+
+    return ordered
+
+
+def _centerline_fallback(pts_2d: np.ndarray, n_bins: int = 36) -> np.ndarray:
+    """Fallback centerline extraction: bin by angle from centroid, average each bin.
+
+    Returns:
+        (M, 2) centerline points (unordered, one per non-empty angular bin).
+    """
+    centroid = pts_2d.mean(axis=0)
+    centered = pts_2d - centroid
+    angles = np.arctan2(centered[:, 1], centered[:, 0])  # [-pi, pi]
+    bin_edges = np.linspace(-np.pi, np.pi, n_bins + 1)
+    bin_idx = np.digitize(angles, bin_edges) - 1
+    bin_idx = np.clip(bin_idx, 0, n_bins - 1)
+
+    centerline_pts = []
+    for b in range(n_bins):
+        mask = bin_idx == b
+        if mask.sum() > 0:
+            centerline_pts.append(pts_2d[mask].mean(axis=0))
+
+    return np.array(centerline_pts)
+
+
+def extract_centerline(mesh: trimesh.Trimesh, pts_2d: np.ndarray) -> np.ndarray:
+    """Extract ordered centerline points from a structured sweep mesh.
+
+    Uses mesh topology to identify cross-sectional rings, then takes
+    ring centroids as centerline points.
+
+    Falls back to boundary-averaging if topology analysis fails.
+
+    Args:
+        mesh: the weld seam trimesh
+        pts_2d: (N, 2) PCA-projected vertex coordinates
+
+    Returns:
+        centerline: (M, 2) ordered 2D centerline points
+    """
+    try:
+        return _centerline_from_topology(mesh, pts_2d)
+    except Exception:
+        return _centerline_fallback(pts_2d)

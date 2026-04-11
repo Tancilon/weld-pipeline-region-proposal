@@ -77,3 +77,77 @@ def test_back_project_roundtrip():
     assert recovered.shape == (50, 3)
     projected_orig = back_project(pca_project(points_3d)[0], plane)
     np.testing.assert_allclose(recovered, projected_orig, atol=1e-10)
+
+
+from scripts.extract_weld_seams import extract_centerline
+
+
+def _make_tube_mesh(n_rings=20, n_per_ring=8, radius=2.0, length=100.0):
+    """Create a synthetic tube mesh (structured sweep) along the X axis."""
+    verts = []
+    faces = []
+    for i in range(n_rings):
+        x = length * i / (n_rings - 1)
+        for j in range(n_per_ring):
+            angle = 2 * np.pi * j / n_per_ring
+            y = radius * np.cos(angle)
+            z = radius * np.sin(angle)
+            verts.append([x, y, z])
+    verts = np.array(verts)
+    for i in range(n_rings - 1):
+        for j in range(n_per_ring):
+            j_next = (j + 1) % n_per_ring
+            v0 = i * n_per_ring + j
+            v1 = i * n_per_ring + j_next
+            v2 = (i + 1) * n_per_ring + j
+            v3 = (i + 1) * n_per_ring + j_next
+            faces.append([v0, v1, v2])
+            faces.append([v1, v3, v2])
+    mesh = trimesh.Trimesh(vertices=verts, faces=np.array(faces))
+    return mesh
+
+
+def test_extract_centerline_straight_tube():
+    mesh = _make_tube_mesh(n_rings=20, n_per_ring=8, radius=2.0, length=100.0)
+    pts_2d, plane = pca_project(mesh.vertices)
+    centerline = extract_centerline(mesh, pts_2d)
+    assert len(centerline) >= 10
+    x_range = centerline[:, 0].max() - centerline[:, 0].min()
+    y_range = centerline[:, 1].max() - centerline[:, 1].min()
+    assert x_range > 50
+    assert y_range < 5
+
+
+def test_extract_centerline_arc_tube():
+    n_rings, n_per_ring = 30, 8
+    arc_radius, tube_radius = 50.0, 2.0
+    verts = []
+    for i in range(n_rings):
+        theta = np.pi * i / (n_rings - 1)
+        cx = arc_radius * np.cos(theta)
+        cy = arc_radius * np.sin(theta)
+        for j in range(n_per_ring):
+            angle = 2 * np.pi * j / n_per_ring
+            tangent = np.array([-np.sin(theta), np.cos(theta)])
+            normal = np.array([np.cos(theta), np.sin(theta)])
+            x = cx + tube_radius * np.cos(angle) * normal[0]
+            y = cy + tube_radius * np.cos(angle) * normal[1]
+            z = tube_radius * np.sin(angle)
+            verts.append([x, y, z])
+    verts = np.array(verts)
+    faces = []
+    for i in range(n_rings - 1):
+        for j in range(n_per_ring):
+            j_next = (j + 1) % n_per_ring
+            v0 = i * n_per_ring + j
+            v1 = i * n_per_ring + j_next
+            v2 = (i + 1) * n_per_ring + j
+            v3 = (i + 1) * n_per_ring + j_next
+            faces.append([v0, v1, v2])
+            faces.append([v1, v3, v2])
+    mesh = trimesh.Trimesh(vertices=verts, faces=np.array(faces))
+    pts_2d, plane = pca_project(mesh.vertices)
+    centerline = extract_centerline(mesh, pts_2d)
+    assert len(centerline) >= 15
+    dists = np.sqrt(centerline[:, 0]**2 + centerline[:, 1]**2)
+    np.testing.assert_allclose(dists, arc_radius, atol=5.0)
