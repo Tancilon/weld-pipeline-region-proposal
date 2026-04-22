@@ -8,6 +8,7 @@ from pathlib import Path
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d.art3d import Line3DCollection
 import numpy as np
 import trimesh
 
@@ -553,6 +554,53 @@ def _project_to_plane(pts_3d, plane):
     return np.column_stack([u, v])
 
 
+def _feature_edge_segments(mesh, angle_threshold_deg: float = 30.0,
+                           max_segments: int = 4000) -> list:
+    """Return 3D segments for a sparse wireframe view of the mesh.
+
+    Prefers feature edges — boundaries and creases with dihedral angles
+    above the threshold — to match MeshLab's crease-edge display. If
+    the mesh is smooth and has no crease edges (e.g., a straight tube),
+    falls back to a stride-sampled subset of all edges so the 3D panel
+    still shows some geometry.
+    """
+    verts = mesh.vertices
+    faces = mesh.faces
+    tri0 = verts[faces[:, 0]]
+    tri1 = verts[faces[:, 1]]
+    tri2 = verts[faces[:, 2]]
+    face_normals = np.cross(tri1 - tri0, tri2 - tri0)
+    norms = np.linalg.norm(face_normals, axis=1, keepdims=True)
+    norms[norms < 1e-12] = 1.0
+    face_normals = face_normals / norms
+
+    cos_thresh = np.cos(np.deg2rad(angle_threshold_deg))
+    edge_faces: dict[tuple, list] = {}
+    for fi, face in enumerate(faces):
+        for i in range(3):
+            a, b = int(face[i]), int(face[(i + 1) % 3])
+            key = (a, b) if a < b else (b, a)
+            edge_faces.setdefault(key, []).append(fi)
+
+    feature = []
+    all_edges = []
+    for (a, b), face_ids in edge_faces.items():
+        all_edges.append((a, b))
+        if len(face_ids) == 1:
+            feature.append([verts[a], verts[b]])
+        elif len(face_ids) == 2:
+            n1 = face_normals[face_ids[0]]
+            n2 = face_normals[face_ids[1]]
+            if abs(float(np.dot(n1, n2))) < cos_thresh:
+                feature.append([verts[a], verts[b]])
+
+    if len(feature) >= 20:
+        return feature[:max_segments]
+    # Smooth mesh fallback: subsample all edges for a sparse wireframe
+    stride = max(1, len(all_edges) // max_segments)
+    return [[verts[a], verts[b]] for (a, b) in all_edges[::stride]]
+
+
 def visualize_multi(paths_data, mesh, output_path):
     """Generate multi-path overlay plot: all paths on a single 2D+3D panel.
 
@@ -567,11 +615,18 @@ def visualize_multi(paths_data, mesh, output_path):
     ax1 = fig.add_subplot(121)
     ax2 = fig.add_subplot(122, projection='3d')
 
-    # 3D background: the full mesh in semi-transparent gray
+    # 3D background: render the mesh as a sparse wireframe (feature edges
+    # only). Filled trisurf obscures thin ring geometry. We emit only edges
+    # with a large dihedral angle — these trace silhouettes of the sweep
+    # cross-section, keeping the weld seam shape visible without flooding
+    # the plot with interior triangulation.
     verts = mesh.vertices
-    ax2.plot_trisurf(verts[:, 0], verts[:, 1], verts[:, 2],
-                     triangles=mesh.faces, alpha=0.2, color='gray',
-                     edgecolor='none')
+    segments = _feature_edge_segments(mesh)
+    if segments:
+        wire = Line3DCollection(segments, colors="gray",
+                                linewidths=0.4, alpha=0.6)
+        ax2.add_collection3d(wire)
+    ax2.auto_scale_xyz(verts[:, 0], verts[:, 1], verts[:, 2])
 
     for idx, path in enumerate(paths_data):
         line_color, arc_color = _PATH_COLORS[idx % len(_PATH_COLORS)]
