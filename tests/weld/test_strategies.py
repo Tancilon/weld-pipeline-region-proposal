@@ -116,3 +116,27 @@ def test_run_pipeline_uses_generic_when_no_category(tmp_path):
     data = json.loads(Path(output).read_text())
     assert "weld_paths" in data
     assert len(data["weld_paths"]) == 2
+
+
+def test_bellmouth_strategy_fits_single_line_per_component():
+    from weld.strategies.bellmouth import BellmouthStrategy
+    m1 = _make_tube_mesh()
+    v2 = m1.vertices.copy()
+    v2[:, 1] += 30
+    mesh = trimesh.Trimesh(
+        vertices=np.vstack([m1.vertices, v2]),
+        faces=np.vstack([m1.faces, m1.faces + len(m1.vertices)]),
+    )
+    paths = BellmouthStrategy().process(mesh)
+    assert len(paths) == 2
+    for p in paths:
+        assert p["closed"] is False
+        assert len(p["fitted"]) == 1
+        assert p["fitted"][0]["type"] == "line"
+        # Straight tube of length 100 should fit with near-zero error
+        assert p["fitted"][0]["fitting_error_mm"] < 1.0
+
+
+def test_get_strategy_returns_bellmouth():
+    from weld.strategies.bellmouth import BellmouthStrategy
+    assert isinstance(get_strategy("bellmouth"), BellmouthStrategy)

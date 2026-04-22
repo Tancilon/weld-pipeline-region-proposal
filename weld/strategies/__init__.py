@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 from weld.strategies.base import Strategy, GenericStrategy
+from weld.strategies.bellmouth import BellmouthStrategy
 
 
-_REGISTRY: dict[str, type[Strategy]] = {}
+_REGISTRY: dict[str, type[Strategy]] = {
+    "bellmouth": BellmouthStrategy,
+}
 
 
 def get_strategy(name: str | None) -> Strategy:
@@ -19,4 +22,4 @@ def get_strategy(name: str | None) -> Strategy:
     return cls()
 
 
-__all__ = ["Strategy", "GenericStrategy", "get_strategy"]
+__all__ = ["Strategy", "GenericStrategy", "BellmouthStrategy", "get_strategy"]
