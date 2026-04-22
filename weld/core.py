@@ -511,11 +511,14 @@ def _interpolate_arc_2d(p0, pm, p1, n=50):
     a1 = np.arctan2(p1[1] - uy, p1[0] - ux)
 
     def _unwrap(start, mid, end):
-        mid_adj = (mid - start) % (2 * np.pi)
-        end_adj = (end - start) % (2 * np.pi)
-        if mid_adj > end_adj:
-            end_adj += 2 * np.pi
-        return start, start + mid_adj, start + end_adj
+        # Pick the direction (CCW or CW) that has mid between start and end.
+        mid_ccw = (mid - start) % (2 * np.pi)
+        end_ccw = (end - start) % (2 * np.pi)
+        if mid_ccw < end_ccw:
+            # CCW: positive offsets, mid between start and end
+            return start, start + mid_ccw, start + end_ccw
+        # CW: negate to traverse in the opposite direction
+        return start, start + mid_ccw - 2 * np.pi, start + end_ccw - 2 * np.pi
 
     a0, am, a1 = _unwrap(a0, am, a1)
     R = np.linalg.norm(p0 - center)
@@ -623,8 +626,8 @@ def visualize_multi(paths_data, mesh, output_path):
     verts = mesh.vertices
     segments = _feature_edge_segments(mesh)
     if segments:
-        wire = Line3DCollection(segments, colors="gray",
-                                linewidths=0.4, alpha=0.6)
+        wire = Line3DCollection(segments, colors="lightgray",
+                                linewidths=0.3, alpha=0.35)
         ax2.add_collection3d(wire)
     # Equal data limits on all 3 axes so 1mm looks the same in X, Y, and Z.
     # Pad smaller dimensions symmetrically around their midpoint so the
@@ -663,7 +666,7 @@ def visualize_multi(paths_data, mesh, output_path):
                 ax1.plot(pts_global_2d[:, 0], pts_global_2d[:, 1],
                          'o', color=line_color, markersize=5)
                 ax2.plot(pts_3d[:, 0], pts_3d[:, 1], pts_3d[:, 2],
-                         '-', color=line_color, linewidth=2.5)
+                         '-', color=line_color, linewidth=3.5)
             else:
                 arc_local_2d = _interpolate_arc_2d(
                     pts_local_2d[0], pts_local_2d[1], pts_local_2d[2], n=50)
@@ -674,7 +677,7 @@ def visualize_multi(paths_data, mesh, output_path):
                 ax1.plot(pts_global_2d[:, 0], pts_global_2d[:, 1],
                          'o', color=arc_color, markersize=5)
                 ax2.plot(arc_3d[:, 0], arc_3d[:, 1], arc_3d[:, 2],
-                         '-', color=arc_color, linewidth=2.5)
+                         '-', color=arc_color, linewidth=3.5)
             # Error annotation at mid-point of segment
             mid_idx = len(pts_global_2d) // 2
             mid = pts_global_2d[mid_idx]
