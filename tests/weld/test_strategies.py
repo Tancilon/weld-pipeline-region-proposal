@@ -140,3 +140,50 @@ def test_bellmouth_strategy_fits_single_line_per_component():
 def test_get_strategy_returns_bellmouth():
     from weld.strategies.bellmouth import BellmouthStrategy
     assert isinstance(get_strategy("bellmouth"), BellmouthStrategy)
+
+
+def _make_circle_tube_mesh(radius=50.0, tube_r=2.0, n_along=40, n_per_ring=8):
+    """Make a mesh approximating a torus (circle sweep)."""
+    verts = []
+    faces = []
+    for i in range(n_along):
+        theta = 2 * np.pi * i / n_along
+        cx = radius * np.cos(theta)
+        cy = radius * np.sin(theta)
+        for j in range(n_per_ring):
+            ang = 2 * np.pi * j / n_per_ring
+            normal = np.array([np.cos(theta), np.sin(theta)])
+            x = cx + tube_r * np.cos(ang) * normal[0]
+            y = cy + tube_r * np.cos(ang) * normal[1]
+            z = tube_r * np.sin(ang)
+            verts.append([x, y, z])
+    for i in range(n_along):
+        i_next = (i + 1) % n_along
+        for j in range(n_per_ring):
+            jn = (j + 1) % n_per_ring
+            v0 = i * n_per_ring + j
+            v1 = i * n_per_ring + jn
+            v2 = i_next * n_per_ring + j
+            v3 = i_next * n_per_ring + jn
+            faces.append([v0, v1, v2])
+            faces.append([v1, v3, v2])
+    return trimesh.Trimesh(vertices=verts, faces=np.array(faces))
+
+
+def test_square_tube_strategy_fits_four_arcs():
+    from weld.strategies.square_tube import SquareTubeStrategy
+    mesh = _make_circle_tube_mesh(radius=50.0, tube_r=2.0)
+    paths = SquareTubeStrategy().process(mesh)
+    assert len(paths) == 1
+    path = paths[0]
+    assert path["closed"] is True
+    assert len(path["fitted"]) == 4
+    for seg in path["fitted"]:
+        assert seg["type"] == "arc"
+        # Circle fit on dense ring should have small error
+        assert seg["fitting_error_mm"] < 3.0
+
+
+def test_get_strategy_returns_square_tube():
+    from weld.strategies.square_tube import SquareTubeStrategy
+    assert isinstance(get_strategy("square_tube"), SquareTubeStrategy)
