@@ -585,6 +585,32 @@ def print_summary(model_name, planarity, centerline, fitted_segments, closed):
     print(f"  Closed: {closed}")
 
 
+def _process_component(component_mesh, force_close=False):
+    """Run the single-path pipeline (PCA → centerline → segment → fit) on one mesh component.
+
+    Args:
+        component_mesh: a trimesh.Trimesh representing one connected weld component
+        force_close: if True and path not naturally closed, append a closing line
+
+    Returns:
+        dict with keys: centerline_2d, plane, fitted, closed
+    """
+    pts_2d, plane = pca_project(component_mesh.vertices)
+    centerline = extract_centerline(component_mesh, pts_2d)
+    segments = segment_by_curvature(centerline)
+    fitted = [fit_segment(seg) for seg in segments]
+    is_closed = detect_closed(centerline)
+    if force_close and not is_closed:
+        fitted = fitted + [_make_closing_segment(fitted, centerline)]
+        is_closed = True
+    return {
+        "centerline_2d": centerline,
+        "plane": plane,
+        "fitted": fitted,
+        "closed": is_closed,
+    }
+
+
 def run_pipeline(workpiece_path, weld_path, output_path=None, no_viz=False,
                  force_close=False):
     model_name = extract_model_name(workpiece_path)

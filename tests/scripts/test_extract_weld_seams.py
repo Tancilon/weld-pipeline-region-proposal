@@ -346,3 +346,32 @@ def test_build_json_output_multi_paths():
     path_b_pts = result["weld_paths"][1]["segments"][0]["points"]
     np.testing.assert_allclose(path_b_pts[0], [100, 0, 0], atol=1e-6)
     np.testing.assert_allclose(path_b_pts[1], [100, 20, 0], atol=1e-6)
+
+
+from scripts.extract_weld_seams import _process_component
+
+
+def test_process_component_straight_tube():
+    mesh = _make_tube_mesh(n_rings=20, n_per_ring=8, radius=2.0, length=100.0)
+    path = _process_component(mesh, force_close=False)
+    assert "centerline_2d" in path
+    assert "plane" in path
+    assert "fitted" in path
+    assert "closed" in path
+    assert len(path["fitted"]) >= 1
+    assert path["closed"] is False
+    for seg in path["fitted"]:
+        assert "type" in seg
+        assert "points_2d" in seg
+        assert "fitting_error_mm" in seg
+
+
+def test_process_component_force_close_adds_segment():
+    mesh = _make_tube_mesh(n_rings=20, n_per_ring=8, radius=2.0, length=100.0)
+    path_open = _process_component(mesh, force_close=False)
+    path_closed = _process_component(mesh, force_close=True)
+    assert len(path_closed["fitted"]) == len(path_open["fitted"]) + 1
+    assert path_closed["closed"] is True
+    closing = path_closed["fitted"][-1]
+    assert closing["type"] == "line"
+    assert closing["fitting_error_mm"] == 0.0
