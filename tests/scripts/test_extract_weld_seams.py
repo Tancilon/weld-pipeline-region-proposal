@@ -85,7 +85,7 @@ def test_back_project_roundtrip():
 from scripts.extract_weld_seams import compute_curvature, segment_by_curvature
 from scripts.extract_weld_seams import fit_segment, fit_line_error, fit_arc_error
 from scripts.extract_weld_seams import extract_centerline
-from scripts.extract_weld_seams import detect_closed, build_json_output
+from scripts.extract_weld_seams import detect_closed, build_json_output_multi
 
 
 def _make_tube_mesh(n_rings=20, n_per_ring=8, radius=2.0, length=100.0):
@@ -259,7 +259,7 @@ def test_detect_closed_false():
     assert detect_closed(pts) is False
 
 
-def test_build_json_output():
+def test_build_json_output_single_path():
     plane = {
         "origin": np.array([0.0, 0.0, 0.0]),
         "u": np.array([1.0, 0.0, 0.0]),
@@ -280,15 +280,69 @@ def test_build_json_output():
         },
     ]
     centerline = np.array([[0, 0], [5, 0], [10, 0], [15, 5], [20, 0]])
-    result = build_json_output("工件1", fitted, centerline, plane)
+    paths_data = [{
+        "centerline_2d": centerline,
+        "plane": plane,
+        "fitted": fitted,
+        "closed": False,
+    }]
+    result = build_json_output_multi("工件1", paths_data)
     assert result["model"] == "工件1"
     assert result["coord_system"] == "raw"
-    assert isinstance(result["closed"], bool)
-    assert len(result["weld_seams"]) == 2
-    line_pts = result["weld_seams"][0]["points"]
+    assert "closed" not in result
+    assert len(result["weld_paths"]) == 1
+    path = result["weld_paths"][0]
+    assert path["closed"] is False
+    assert len(path["segments"]) == 2
+    line_pts = path["segments"][0]["points"]
     assert len(line_pts) == 2
     assert len(line_pts[0]) == 3
-    arc_pts = result["weld_seams"][1]["points"]
+    arc_pts = path["segments"][1]["points"]
     assert len(arc_pts) == 3
     json_str = json.dumps(result, ensure_ascii=False)
     assert "工件1" in json_str
+
+
+def test_build_json_output_multi_paths():
+    plane_a = {
+        "origin": np.array([0.0, 0.0, 0.0]),
+        "u": np.array([1.0, 0.0, 0.0]),
+        "v": np.array([0.0, 1.0, 0.0]),
+        "n": np.array([0.0, 0.0, 1.0]),
+        "planarity": 0.99,
+    }
+    plane_b = {
+        "origin": np.array([100.0, 0.0, 0.0]),
+        "u": np.array([0.0, 1.0, 0.0]),
+        "v": np.array([0.0, 0.0, 1.0]),
+        "n": np.array([1.0, 0.0, 0.0]),
+        "planarity": 0.99,
+    }
+    fitted_a = [{
+        "type": "line",
+        "points_2d": [np.array([0.0, 0.0]), np.array([10.0, 0.0])],
+        "fitting_error_mm": 0.05,
+    }]
+    fitted_b = [{
+        "type": "line",
+        "points_2d": [np.array([0.0, 0.0]), np.array([20.0, 0.0])],
+        "fitting_error_mm": 0.08,
+    }]
+    paths_data = [
+        {"centerline_2d": np.array([[0, 0], [10, 0]]),
+         "plane": plane_a, "fitted": fitted_a, "closed": False},
+        {"centerline_2d": np.array([[0, 0], [20, 0]]),
+         "plane": plane_b, "fitted": fitted_b, "closed": True},
+    ]
+    result = build_json_output_multi("bellmouth", paths_data)
+    assert len(result["weld_paths"]) == 2
+    assert result["weld_paths"][0]["closed"] is False
+    assert result["weld_paths"][1]["closed"] is True
+    assert len(result["weld_paths"][0]["segments"]) == 1
+    assert len(result["weld_paths"][1]["segments"]) == 1
+    path_a_pts = result["weld_paths"][0]["segments"][0]["points"]
+    np.testing.assert_allclose(path_a_pts[0], [0, 0, 0], atol=1e-6)
+    np.testing.assert_allclose(path_a_pts[1], [10, 0, 0], atol=1e-6)
+    path_b_pts = result["weld_paths"][1]["segments"][0]["points"]
+    np.testing.assert_allclose(path_b_pts[0], [100, 0, 0], atol=1e-6)
+    np.testing.assert_allclose(path_b_pts[1], [100, 20, 0], atol=1e-6)

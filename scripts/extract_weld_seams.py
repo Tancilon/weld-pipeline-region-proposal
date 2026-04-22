@@ -460,24 +460,38 @@ def _make_closing_segment(fitted_segments, centerline):
     }
 
 
-def build_json_output(model_name, fitted_segments, centerline, plane,
-                      force_close=False):
-    """Assemble final JSON structure with 3D back-projected coordinates."""
-    closed = detect_closed(centerline) or force_close
-    weld_seams = []
-    for seg in fitted_segments:
-        pts_2d = np.array(seg["points_2d"])
-        pts_3d = back_project(pts_2d, plane)
-        weld_seams.append({
-            "type": seg["type"],
-            "points": [[round(c, 6) for c in pt] for pt in pts_3d.tolist()],
-            "fitting_error_mm": seg["fitting_error_mm"],
+def build_json_output_multi(model_name, paths_data):
+    """Assemble final JSON with multiple weld paths.
+
+    Args:
+        model_name: model name string
+        paths_data: list of dicts, each containing:
+            - "fitted": list of fitted segment dicts (with points_2d)
+            - "plane": PCA plane dict for this path
+            - "closed": bool, whether this path is closed
+
+    Returns:
+        JSON-serializable dict with model, coord_system, and weld_paths.
+    """
+    weld_paths = []
+    for path in paths_data:
+        segments_json = []
+        for seg in path["fitted"]:
+            pts_2d = np.array(seg["points_2d"])
+            pts_3d = back_project(pts_2d, path["plane"])
+            segments_json.append({
+                "type": seg["type"],
+                "points": [[round(c, 6) for c in pt] for pt in pts_3d.tolist()],
+                "fitting_error_mm": seg["fitting_error_mm"],
+            })
+        weld_paths.append({
+            "closed": bool(path["closed"]),
+            "segments": segments_json,
         })
     return {
         "model": model_name,
         "coord_system": "raw",
-        "closed": closed,
-        "weld_seams": weld_seams,
+        "weld_paths": weld_paths,
     }
 
 
