@@ -558,7 +558,7 @@ def _project_to_plane(pts_3d, plane):
 
 
 def _feature_edge_segments(mesh, angle_threshold_deg: float = 30.0,
-                           max_segments: int = 4000) -> list:
+                           max_segments: int = 800) -> list:
     """Return 3D segments for a sparse wireframe view of the mesh.
 
     Prefers feature edges — boundaries and creases with dihedral angles
@@ -597,11 +597,13 @@ def _feature_edge_segments(mesh, angle_threshold_deg: float = 30.0,
             if abs(float(np.dot(n1, n2))) < cos_thresh:
                 feature.append([verts[a], verts[b]])
 
-    if len(feature) >= 20:
-        return feature[:max_segments]
-    # Smooth mesh fallback: subsample all edges for a sparse wireframe
-    stride = max(1, len(all_edges) // max_segments)
-    return [[verts[a], verts[b]] for (a, b) in all_edges[::stride]]
+    # Combine feature edges with a stride-sampled subset of ALL edges so
+    # smooth meshes (e.g. cylindrical tubes whose only feature edges are
+    # tiny end-cap circles) still show their surface along the length.
+    target_sample = max(0, max_segments - len(feature))
+    stride = max(1, len(all_edges) // max(target_sample, 1))
+    sampled = [[verts[a], verts[b]] for (a, b) in all_edges[::stride]]
+    return (feature + sampled)[:max_segments]
 
 
 def visualize_multi(paths_data, mesh, output_path):
@@ -627,7 +629,7 @@ def visualize_multi(paths_data, mesh, output_path):
     segments = _feature_edge_segments(mesh)
     if segments:
         wire = Line3DCollection(segments, colors="lightgray",
-                                linewidths=0.3, alpha=0.35)
+                                linewidths=0.4, alpha=0.4)
         ax2.add_collection3d(wire)
     # Equal data limits on all 3 axes so 1mm looks the same in X, Y, and Z.
     # Pad smaller dimensions symmetrically around their midpoint so the
