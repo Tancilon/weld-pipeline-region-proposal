@@ -244,10 +244,10 @@ def test_channel_steel_strategy_is_strategy_subclass():
     assert issubclass(ChannelSteelStrategy, Strategy)
 
 
-def test_h_beam_strategy_is_generic_subclass():
+def test_h_beam_strategy_reuses_channel_steel_algorithm():
     from weld.strategies.h_beam import HBeamStrategy
-    from weld.strategies.base import GenericStrategy
-    assert issubclass(HBeamStrategy, GenericStrategy)
+    from weld.strategies.channel_steel import ChannelSteelStrategy
+    assert issubclass(HBeamStrategy, ChannelSteelStrategy)
 
 
 def test_registry_has_all_five_categories():
