@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 import trimesh
 
-from scripts.extract_weld_seams import load_weld_mesh, extract_model_name
+from weld.core import load_weld_mesh, extract_model_name
 
 
 def _make_obj_scene(tmp_path, objects: dict[str, np.ndarray]) -> str:
@@ -47,7 +47,7 @@ def test_extract_model_name():
     assert extract_model_name("assets/part_A.obj") == "part_A"
 
 
-from scripts.extract_weld_seams import pca_project, back_project
+from weld.core import pca_project, back_project
 
 
 def test_pca_project_planar_points():
@@ -82,10 +82,10 @@ def test_back_project_roundtrip():
     np.testing.assert_allclose(recovered, projected_orig, atol=1e-10)
 
 
-from scripts.extract_weld_seams import compute_curvature, segment_by_curvature
-from scripts.extract_weld_seams import fit_segment, fit_line_error, fit_arc_error
-from scripts.extract_weld_seams import extract_centerline
-from scripts.extract_weld_seams import detect_closed, build_json_output_multi
+from weld.core import compute_curvature, segment_by_curvature
+from weld.core import fit_segment, fit_line_error, fit_arc_error
+from weld.core import extract_centerline
+from weld.core import detect_closed, build_json_output_multi
 
 
 def _make_tube_mesh(n_rings=20, n_per_ring=8, radius=2.0, length=100.0):
@@ -157,7 +157,7 @@ def test_extract_centerline_arc_tube():
     assert len(centerline) >= 15
     # Fit a circle to the centerline and verify the radius matches arc_radius.
     # This is more robust than checking individual point distances.
-    from scripts.extract_weld_seams import _fit_circle_center
+    from weld.core import _fit_circle_center
     center, fitted_radius = _fit_circle_center(centerline)
     assert abs(fitted_radius - arc_radius) < 5.0, (
         f"Fitted radius {fitted_radius:.1f} differs from expected {arc_radius}"
@@ -348,7 +348,7 @@ def test_build_json_output_multi_paths():
     np.testing.assert_allclose(path_b_pts[1], [100, 20, 0], atol=1e-6)
 
 
-from scripts.extract_weld_seams import _process_component
+from weld.core import _process_component
 
 
 def test_process_component_straight_tube():
@@ -377,7 +377,7 @@ def test_process_component_force_close_adds_segment():
     assert closing["fitting_error_mm"] == 0.0
 
 
-from scripts.extract_weld_seams import run_pipeline
+from weld.core import run_pipeline
 
 
 def _make_two_line_obj(tmp_path):
