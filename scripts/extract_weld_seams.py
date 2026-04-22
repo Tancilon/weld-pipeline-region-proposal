@@ -674,6 +674,9 @@ def _process_component(component_mesh, force_close=False):
     }
 
 
+MIN_COMPONENT_VERTICES = 10
+
+
 def run_pipeline(workpiece_path, weld_path, output_path=None, no_viz=False,
                  force_close=False):
     model_name = extract_model_name(workpiece_path)
@@ -683,27 +686,24 @@ def run_pipeline(workpiece_path, weld_path, output_path=None, no_viz=False,
     viz_path = output_path.replace(".json", "_fit.png")
 
     mesh = load_weld_mesh(weld_path)
-    pts_2d, plane = pca_project(mesh.vertices)
-    centerline = extract_centerline(mesh, pts_2d)
-    segments = segment_by_curvature(centerline)
-    fitted = [fit_segment(seg) for seg in segments]
-    if force_close and not detect_closed(centerline):
-        closing = _make_closing_segment(fitted, centerline)
-        fitted_with_close = fitted + [closing]
-    else:
-        fitted_with_close = fitted
-    result = build_json_output(model_name, fitted_with_close, centerline, plane,
-                               force_close=force_close)
+    components = mesh.split(only_watertight=False)
+    components = [c for c in components if len(c.vertices) >= MIN_COMPONENT_VERTICES]
+    if len(components) == 0:
+        raise ValueError(
+            f"No valid mesh components found (all < {MIN_COMPONENT_VERTICES} vertices)"
+        )
 
-    print_summary(model_name, plane["planarity"], centerline,
-                  result["weld_seams"], result["closed"])
+    paths_data = [_process_component(c, force_close=force_close) for c in components]
+
+    result = build_json_output_multi(model_name, paths_data)
+    print_summary(model_name, paths_data)
 
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
     print(f"\nJSON saved to: {output_path}")
 
     if not no_viz:
-        visualize(centerline, fitted_with_close, mesh, plane, viz_path)
+        visualize_multi(paths_data, mesh, viz_path)
         print(f"Visualization saved to: {viz_path}")
 
 

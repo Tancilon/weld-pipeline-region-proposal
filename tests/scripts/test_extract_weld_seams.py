@@ -375,3 +375,135 @@ def test_process_component_force_close_adds_segment():
     closing = path_closed["fitted"][-1]
     assert closing["type"] == "line"
     assert closing["fitting_error_mm"] == 0.0
+
+
+from scripts.extract_weld_seams import run_pipeline
+
+
+def _make_two_line_obj(tmp_path):
+    """Create an OBJ with two disconnected straight tube components."""
+    verts = []
+    faces = []
+
+    # First tube: along X axis from 0 to 100
+    # Use same parameters as _make_tube_mesh so detect_closed reliably returns False
+    n_rings_a = 20
+    n_per_ring = 8
+    tube_r = 2.0
+    for i in range(n_rings_a):
+        x = 100 * i / (n_rings_a - 1)
+        for j in range(n_per_ring):
+            ang = 2 * np.pi * j / n_per_ring
+            verts.append([x, tube_r * np.cos(ang), tube_r * np.sin(ang)])
+    for i in range(n_rings_a - 1):
+        for j in range(n_per_ring):
+            jn = (j + 1) % n_per_ring
+            v0 = i * n_per_ring + j
+            v1 = i * n_per_ring + jn
+            v2 = (i + 1) * n_per_ring + j
+            v3 = (i + 1) * n_per_ring + jn
+            faces.append([v0, v1, v2])
+            faces.append([v1, v3, v2])
+
+    # Second tube: parallel, offset in Y, from 0 to 100
+    offset_a = n_rings_a * n_per_ring
+    for i in range(n_rings_a):
+        x = 100 * i / (n_rings_a - 1)
+        for j in range(n_per_ring):
+            ang = 2 * np.pi * j / n_per_ring
+            verts.append([x, 30.0 + tube_r * np.cos(ang), tube_r * np.sin(ang)])
+    for i in range(n_rings_a - 1):
+        for j in range(n_per_ring):
+            jn = (j + 1) % n_per_ring
+            v0 = offset_a + i * n_per_ring + j
+            v1 = offset_a + i * n_per_ring + jn
+            v2 = offset_a + (i + 1) * n_per_ring + j
+            v3 = offset_a + (i + 1) * n_per_ring + jn
+            faces.append([v0, v1, v2])
+            faces.append([v1, v3, v2])
+
+    lines = ["o 焊缝"]
+    for v in verts:
+        lines.append(f"v {v[0]} {v[1]} {v[2]}")
+    for f in faces:
+        lines.append(f"f {f[0]+1} {f[1]+1} {f[2]+1}")
+
+    obj_path = tmp_path / "two_lines_weld.obj"
+    obj_path.write_text("\n".join(lines))
+
+    wp_path = tmp_path / "dual.obj"
+    wp_path.write_text("o dummy\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n")
+
+    return str(wp_path), str(obj_path)
+
+
+def test_run_pipeline_multi_component(tmp_path):
+    wp_path, weld_path = _make_two_line_obj(tmp_path)
+    output = tmp_path / "out.json"
+    run_pipeline(wp_path, weld_path, str(output), no_viz=True, force_close=False)
+    with open(output) as f:
+        data = json.load(f)
+    assert data["model"] == "dual"
+    assert "weld_paths" in data
+    # Two disconnected tube components must produce two separate weld paths
+    assert len(data["weld_paths"]) == 2
+    for path in data["weld_paths"]:
+        # Each path must have at least one segment with required keys
+        assert len(path["segments"]) >= 1
+        for seg in path["segments"]:
+            assert seg["type"] in ("line", "arc")
+            assert len(seg["points"]) >= 2
+
+
+def test_component_filter_drops_tiny(tmp_path):
+    """A mesh with one real component + one tiny noise component should output 1 path."""
+    verts = []
+    faces = []
+
+    # Real tube component (60 verts)
+    n_rings = 10
+    n_per_ring = 6
+    tube_r = 1.0
+    for i in range(n_rings):
+        x = 50 * i / (n_rings - 1)
+        for j in range(n_per_ring):
+            ang = 2 * np.pi * j / n_per_ring
+            verts.append([x, tube_r * np.cos(ang), tube_r * np.sin(ang)])
+    for i in range(n_rings - 1):
+        for j in range(n_per_ring):
+            jn = (j + 1) % n_per_ring
+            v0 = i * n_per_ring + j
+            v1 = i * n_per_ring + jn
+            v2 = (i + 1) * n_per_ring + j
+            v3 = (i + 1) * n_per_ring + jn
+            faces.append([v0, v1, v2])
+            faces.append([v1, v3, v2])
+
+    # Tiny noise component (4 verts, 2 triangles)
+    base = len(verts)
+    verts.extend([
+        [1000, 1000, 1000],
+        [1001, 1000, 1000],
+        [1000, 1001, 1000],
+        [1000, 1000, 1001],
+    ])
+    faces.append([base, base + 1, base + 2])
+    faces.append([base, base + 1, base + 3])
+
+    lines = ["o 焊缝"]
+    for v in verts:
+        lines.append(f"v {v[0]} {v[1]} {v[2]}")
+    for f in faces:
+        lines.append(f"f {f[0]+1} {f[1]+1} {f[2]+1}")
+
+    weld_path = tmp_path / "noisy_weld.obj"
+    weld_path.write_text("\n".join(lines))
+
+    wp_path = tmp_path / "noisy.obj"
+    wp_path.write_text("o dummy\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n")
+
+    output = tmp_path / "out.json"
+    run_pipeline(str(wp_path), str(weld_path), str(output), no_viz=True, force_close=False)
+    with open(output) as f:
+        data = json.load(f)
+    assert len(data["weld_paths"]) == 1
