@@ -626,16 +626,26 @@ def visualize_multi(paths_data, mesh, output_path):
     plt.close()
 
 
-def print_summary(model_name, planarity, centerline, fitted_segments, closed):
-    n_line = sum(1 for s in fitted_segments if s["type"] == "line")
-    n_arc = sum(1 for s in fitted_segments if s["type"] == "arc")
-    max_err = max(s["fitting_error_mm"] for s in fitted_segments) if fitted_segments else 0
+def print_summary(model_name, paths_data):
+    """Print analysis summary for a multi-path weld seam."""
     print(f"Weld seam analysis: {model_name}")
-    print(f"  Planarity: {planarity:.1%} ({'OK' if planarity >= 0.95 else 'WARNING'})")
-    print(f"  Centerline points: {len(centerline)}")
-    print(f"  Segments: {len(fitted_segments)} ({n_line} line, {n_arc} arc)")
-    print(f"  Max fitting error: {max_err:.2f} mm")
-    print(f"  Closed: {closed}")
+    print(f"  Paths: {len(paths_data)}")
+    all_errors = []
+    for idx, path in enumerate(paths_data):
+        planarity = path["plane"]["planarity"]
+        planarity_ok = "OK" if planarity >= 0.95 else "WARNING"
+        n_pts = len(path["centerline_2d"])
+        n_line = sum(1 for s in path["fitted"] if s["type"] == "line")
+        n_arc = sum(1 for s in path["fitted"] if s["type"] == "arc")
+        errors = [s["fitting_error_mm"] for s in path["fitted"]]
+        max_err = max(errors) if errors else 0.0
+        all_errors.extend(errors)
+        print(f"  Path {idx}: Planarity {planarity:.1%} ({planarity_ok}) | "
+              f"{n_pts} centerline pts | "
+              f"{len(path['fitted'])} segments ({n_line} line, {n_arc} arc) | "
+              f"closed: {path['closed']} | max err: {max_err:.2f} mm")
+    overall_max = max(all_errors) if all_errors else 0.0
+    print(f"  Overall max fitting error: {overall_max:.2f} mm")
 
 
 def _process_component(component_mesh, force_close=False):
