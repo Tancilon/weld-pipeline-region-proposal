@@ -523,51 +523,104 @@ def _interpolate_arc_2d(p0, pm, p1, n=50):
     return np.column_stack([ux + R * np.cos(angles), uy + R * np.sin(angles)])
 
 
-def visualize(centerline_2d, fitted_segments, mesh, plane, output_path):
-    """Generate comparison plot: 2D fit overlay + 3D mesh with fitted path."""
+# Path color cycle: (line_color, arc_color) per path index
+_PATH_COLORS = [
+    ("tab:blue", "tab:red"),
+    ("tab:purple", "tab:orange"),
+    ("tab:green", "tab:pink"),
+    ("tab:cyan", "tab:brown"),
+    ("tab:olive", "tab:gray"),
+]
+
+
+def _global_pca_plane(paths_data):
+    """Compute a unified PCA plane across all centerlines' 3D points."""
+    all_pts_3d = []
+    for path in paths_data:
+        pts_3d = back_project(path["centerline_2d"], path["plane"])
+        all_pts_3d.append(pts_3d)
+    all_pts_3d = np.vstack(all_pts_3d)
+    _, global_plane = pca_project(all_pts_3d)
+    return global_plane
+
+
+def _project_to_plane(pts_3d, plane):
+    """Project 3D points onto the given PCA plane returning 2D coords."""
+    diffs = pts_3d - plane["origin"]
+    u = np.dot(diffs, plane["u"])
+    v = np.dot(diffs, plane["v"])
+    return np.column_stack([u, v])
+
+
+def visualize_multi(paths_data, mesh, output_path):
+    """Generate multi-path overlay plot: all paths on a single 2D+3D panel.
+
+    Each path is drawn in its own color (line / arc pair from _PATH_COLORS).
+    The 2D panel uses a global PCA plane so all paths share coordinates.
+    """
+    global_plane = _global_pca_plane(paths_data)
+
     fig = plt.figure(figsize=(16, 7))
-
-    # Left: 2D centerline vs fit
     ax1 = fig.add_subplot(121)
-    ax1.plot(centerline_2d[:, 0], centerline_2d[:, 1], '-', color='gray',
-             linewidth=1, alpha=0.6, label='Centerline')
-    for seg in fitted_segments:
-        pts = np.array(seg["points_2d"])
-        if seg["type"] == "line":
-            ax1.plot(pts[:, 0], pts[:, 1], 'b-', linewidth=2.5)
-            ax1.plot(pts[:, 0], pts[:, 1], 'go', markersize=6)
-        else:
-            arc_pts = _interpolate_arc_2d(pts[0], pts[1], pts[2], n=50)
-            ax1.plot(arc_pts[:, 0], arc_pts[:, 1], 'r-', linewidth=2.5)
-            ax1.plot(pts[:, 0], pts[:, 1], 'go', markersize=6)
-        mid = pts[len(pts) // 2]
-        ax1.annotate(f'{seg["fitting_error_mm"]:.2f}mm', xy=mid, fontsize=8,
-                     color='darkred', textcoords="offset points", xytext=(5, 5))
-    ax1.set_xlabel('u (mm)')
-    ax1.set_ylabel('v (mm)')
-    ax1.set_title('2D Centerline vs Fitted Segments')
-    ax1.set_aspect('equal')
-    ax1.legend(fontsize=8)
-    ax1.grid(True, alpha=0.3)
-
-    # Right: 3D view
     ax2 = fig.add_subplot(122, projection='3d')
+
+    # 3D background: the full mesh in semi-transparent gray
     verts = mesh.vertices
     ax2.plot_trisurf(verts[:, 0], verts[:, 1], verts[:, 2],
-                     triangles=mesh.faces, alpha=0.2, color='gray', edgecolor='none')
-    for seg in fitted_segments:
-        pts_2d = np.array(seg["points_2d"])
-        if seg["type"] == "line":
-            pts_3d = back_project(pts_2d, plane)
-            ax2.plot(pts_3d[:, 0], pts_3d[:, 1], pts_3d[:, 2], 'b-', linewidth=2.5)
-        else:
-            arc_2d = _interpolate_arc_2d(pts_2d[0], pts_2d[1], pts_2d[2], n=50)
-            arc_3d = back_project(arc_2d, plane)
-            ax2.plot(arc_3d[:, 0], arc_3d[:, 1], arc_3d[:, 2], 'r-', linewidth=2.5)
+                     triangles=mesh.faces, alpha=0.2, color='gray',
+                     edgecolor='none')
+
+    for idx, path in enumerate(paths_data):
+        line_color, arc_color = _PATH_COLORS[idx % len(_PATH_COLORS)]
+        local_plane = path["plane"]
+
+        # 2D centerline (via global plane for unified coords)
+        cl_3d = back_project(path["centerline_2d"], local_plane)
+        cl_2d_global = _project_to_plane(cl_3d, global_plane)
+        ax1.plot(cl_2d_global[:, 0], cl_2d_global[:, 1], '-',
+                 color='gray', linewidth=1, alpha=0.5,
+                 label=f'Path {idx} centerline' if idx == 0 else None)
+
+        for seg in path["fitted"]:
+            pts_local_2d = np.array(seg["points_2d"])
+            pts_3d = back_project(pts_local_2d, local_plane)
+            pts_global_2d = _project_to_plane(pts_3d, global_plane)
+            if seg["type"] == "line":
+                ax1.plot(pts_global_2d[:, 0], pts_global_2d[:, 1],
+                         '-', color=line_color, linewidth=2.5)
+                ax1.plot(pts_global_2d[:, 0], pts_global_2d[:, 1],
+                         'o', color=line_color, markersize=5)
+                ax2.plot(pts_3d[:, 0], pts_3d[:, 1], pts_3d[:, 2],
+                         '-', color=line_color, linewidth=2.5)
+            else:
+                arc_local_2d = _interpolate_arc_2d(
+                    pts_local_2d[0], pts_local_2d[1], pts_local_2d[2], n=50)
+                arc_3d = back_project(arc_local_2d, local_plane)
+                arc_global_2d = _project_to_plane(arc_3d, global_plane)
+                ax1.plot(arc_global_2d[:, 0], arc_global_2d[:, 1],
+                         '-', color=arc_color, linewidth=2.5)
+                ax1.plot(pts_global_2d[:, 0], pts_global_2d[:, 1],
+                         'o', color=arc_color, markersize=5)
+                ax2.plot(arc_3d[:, 0], arc_3d[:, 1], arc_3d[:, 2],
+                         '-', color=arc_color, linewidth=2.5)
+            # Error annotation at mid-point of segment
+            mid_idx = len(pts_global_2d) // 2
+            mid = pts_global_2d[mid_idx]
+            ax1.annotate(f'{seg["fitting_error_mm"]:.2f}mm',
+                         xy=mid, fontsize=7, color='darkred',
+                         textcoords="offset points", xytext=(4, 4))
+
+    ax1.set_xlabel('u (mm)')
+    ax1.set_ylabel('v (mm)')
+    ax1.set_title('2D: all paths (global PCA plane)')
+    ax1.set_aspect('equal')
+    ax1.grid(True, alpha=0.3)
+
     ax2.set_xlabel('X (mm)')
     ax2.set_ylabel('Y (mm)')
     ax2.set_zlabel('Z (mm)')
-    ax2.set_title('3D Mesh + Fitted Path')
+    ax2.set_title('3D Mesh + Fitted Paths')
+
     plt.tight_layout()
     plt.savefig(output_path, dpi=150, bbox_inches='tight')
     plt.close()
