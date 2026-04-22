@@ -377,7 +377,7 @@ def test_process_component_force_close_adds_segment():
     assert closing["fitting_error_mm"] == 0.0
 
 
-from weld.core import run_pipeline
+from weld.pipeline import run_pipeline
 
 
 def _make_two_line_obj(tmp_path):
@@ -440,7 +440,7 @@ def _make_two_line_obj(tmp_path):
 def test_run_pipeline_multi_component(tmp_path):
     wp_path, weld_path = _make_two_line_obj(tmp_path)
     output = tmp_path / "out.json"
-    run_pipeline(wp_path, weld_path, str(output), no_viz=True, force_close=False)
+    run_pipeline(wp_path, weld_path, str(output), no_viz=True, category=None)
     with open(output) as f:
         data = json.load(f)
     assert data["model"] == "dual"
@@ -503,7 +503,7 @@ def test_component_filter_drops_tiny(tmp_path):
     wp_path.write_text("o dummy\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n")
 
     output = tmp_path / "out.json"
-    run_pipeline(str(wp_path), str(weld_path), str(output), no_viz=True, force_close=False)
+    run_pipeline(str(wp_path), str(weld_path), str(output), no_viz=True, category=None)
     with open(output) as f:
         data = json.load(f)
     assert len(data["weld_paths"]) == 1

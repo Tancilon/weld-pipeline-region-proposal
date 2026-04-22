@@ -1,6 +1,5 @@
 """Extract weld seam centerlines from OBJ meshes and fit as line/arc sequences."""
 
-import argparse
 import json
 import os
 import warnings
@@ -678,50 +677,3 @@ def _process_component(component_mesh: trimesh.Trimesh,
     }
 
 
-def run_pipeline(workpiece_path, weld_path, output_path=None, no_viz=False,
-                 force_close=False):
-    model_name = extract_model_name(workpiece_path)
-    if output_path is None:
-        out_dir = os.path.dirname(workpiece_path) or "."
-        output_path = os.path.join(out_dir, f"{model_name}_weld_seams.json")
-    viz_path = output_path.replace(".json", "_fit.png")
-
-    mesh = load_weld_mesh(weld_path)
-    components = mesh.split(only_watertight=False)
-    components = [c for c in components if len(c.vertices) >= MIN_COMPONENT_VERTICES]
-    if len(components) == 0:
-        raise ValueError(
-            f"No valid mesh components found (all < {MIN_COMPONENT_VERTICES} vertices)"
-        )
-
-    paths_data = [_process_component(c, force_close=force_close) for c in components]
-
-    result = build_json_output_multi(model_name, paths_data)
-    print_summary(model_name, paths_data)
-
-    with open(output_path, "w", encoding="utf-8") as f:
-        json.dump(result, f, ensure_ascii=False, indent=2)
-    print(f"\nJSON saved to: {output_path}")
-
-    if not no_viz:
-        visualize_multi(paths_data, mesh, viz_path)
-        print(f"Visualization saved to: {viz_path}")
-
-
-def main():
-    parser = argparse.ArgumentParser(
-        description="Extract weld seam centerlines from OBJ mesh and fit as line/arc segments."
-    )
-    parser.add_argument("--workpiece", required=True, help="Path to workpiece OBJ file")
-    parser.add_argument("--weld", required=True, help="Path to weld seam OBJ file")
-    parser.add_argument("--output", default=None, help="JSON output path (default: auto)")
-    parser.add_argument("--no-viz", action="store_true", help="Skip visualization")
-    parser.add_argument("--force-close", action="store_true",
-                        help="Force closed path by adding a closing line segment")
-    args = parser.parse_args()
-    run_pipeline(args.workpiece, args.weld, args.output, args.no_viz,
-                 args.force_close)
-
-
-if __name__ == "__main__":
-    main()
