@@ -46,12 +46,16 @@ class ChannelSteelStrategy(Strategy):
         kappa_smooth = _moving_average_1d(kappa, window=5)
         a0, a1, b0, b1 = _find_two_arc_regions(kappa_smooth)
 
+        # Overlap adjacent pieces by one centerline point so line/arc
+        # boundaries share a common endpoint. Without this, sparse
+        # sampling between bends leaves a visible gap between segments.
+        n = len(centerline_2d)
         pieces = [
-            ("line", 0, a0),
+            ("line", 0, a0 + 1),
             ("arc", a0, a1),
-            ("line", a1, b0),
+            ("line", a1 - 1, b0 + 1),
             ("arc", b0, b1),
-            ("line", b1, len(centerline_2d)),
+            ("line", b1 - 1, n),
         ]
         fitted = []
         for kind, start, end in pieces:
