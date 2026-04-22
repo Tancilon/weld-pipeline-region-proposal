@@ -187,3 +187,37 @@ def test_square_tube_strategy_fits_four_arcs():
 def test_get_strategy_returns_square_tube():
     from weld.strategies.square_tube import SquareTubeStrategy
     assert isinstance(get_strategy("square_tube"), SquareTubeStrategy)
+
+
+def test_cover_plate_strategy_has_force_close_true():
+    from weld.strategies.cover_plate import CoverPlateStrategy
+    assert CoverPlateStrategy.force_close is True
+    from weld.strategies.base import GenericStrategy
+    assert issubclass(CoverPlateStrategy, GenericStrategy)
+
+
+def test_channel_steel_strategy_is_generic_subclass():
+    from weld.strategies.channel_steel import ChannelSteelStrategy
+    from weld.strategies.base import GenericStrategy
+    assert issubclass(ChannelSteelStrategy, GenericStrategy)
+
+
+def test_h_beam_strategy_is_generic_subclass():
+    from weld.strategies.h_beam import HBeamStrategy
+    from weld.strategies.base import GenericStrategy
+    assert issubclass(HBeamStrategy, GenericStrategy)
+
+
+def test_registry_has_all_five_categories():
+    from weld.strategies.bellmouth import BellmouthStrategy
+    from weld.strategies.channel_steel import ChannelSteelStrategy
+    from weld.strategies.h_beam import HBeamStrategy
+    from weld.strategies.square_tube import SquareTubeStrategy
+    from weld.strategies.cover_plate import CoverPlateStrategy
+
+    assert isinstance(get_strategy("bellmouth"), BellmouthStrategy)
+    assert isinstance(get_strategy("channel_steel"), ChannelSteelStrategy)
+    assert isinstance(get_strategy("h_beam"), HBeamStrategy)
+    assert isinstance(get_strategy("H_beam"), HBeamStrategy)  # legacy alias
+    assert isinstance(get_strategy("square_tube"), SquareTubeStrategy)
+    assert isinstance(get_strategy("cover_plate"), CoverPlateStrategy)
