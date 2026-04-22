@@ -532,6 +532,8 @@ _PATH_COLORS = [
     ("tab:olive", "tab:gray"),
 ]
 
+MIN_COMPONENT_VERTICES = 10
+
 
 def _global_pca_plane(paths_data):
     """Compute a unified PCA plane across all centerlines' 3D points."""
@@ -558,6 +560,8 @@ def visualize_multi(paths_data, mesh, output_path):
     Each path is drawn in its own color (line / arc pair from _PATH_COLORS).
     The 2D panel uses a global PCA plane so all paths share coordinates.
     """
+    if not paths_data:
+        return
     global_plane = _global_pca_plane(paths_data)
 
     fig = plt.figure(figsize=(16, 7))
@@ -578,8 +582,7 @@ def visualize_multi(paths_data, mesh, output_path):
         cl_3d = back_project(path["centerline_2d"], local_plane)
         cl_2d_global = _project_to_plane(cl_3d, global_plane)
         ax1.plot(cl_2d_global[:, 0], cl_2d_global[:, 1], '-',
-                 color='gray', linewidth=1, alpha=0.5,
-                 label=f'Path {idx} centerline' if idx == 0 else None)
+                 color='gray', linewidth=1, alpha=0.5)
 
         for seg in path["fitted"]:
             pts_local_2d = np.array(seg["points_2d"])
@@ -648,7 +651,8 @@ def print_summary(model_name, paths_data):
     print(f"  Overall max fitting error: {overall_max:.2f} mm")
 
 
-def _process_component(component_mesh, force_close=False):
+def _process_component(component_mesh: trimesh.Trimesh,
+                       force_close: bool = False) -> dict:
     """Run the single-path pipeline (PCA → centerline → segment → fit) on one mesh component.
 
     Args:
@@ -672,9 +676,6 @@ def _process_component(component_mesh, force_close=False):
         "fitted": fitted,
         "closed": is_closed,
     }
-
-
-MIN_COMPONENT_VERTICES = 10
 
 
 def run_pipeline(workpiece_path, weld_path, output_path=None, no_viz=False,
