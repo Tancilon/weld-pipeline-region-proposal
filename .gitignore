@@ -12,3 +12,4 @@ common
 *.DS_Store
 .codex
 .vscode/
+assets/
