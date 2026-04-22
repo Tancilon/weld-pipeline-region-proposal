@@ -238,10 +238,10 @@ def test_cover_plate_strategy_has_force_close_true():
     assert issubclass(CoverPlateStrategy, GenericStrategy)
 
 
-def test_channel_steel_strategy_is_generic_subclass():
+def test_channel_steel_strategy_is_strategy_subclass():
     from weld.strategies.channel_steel import ChannelSteelStrategy
-    from weld.strategies.base import GenericStrategy
-    assert issubclass(ChannelSteelStrategy, GenericStrategy)
+    from weld.strategies.base import Strategy
+    assert issubclass(ChannelSteelStrategy, Strategy)
 
 
 def test_h_beam_strategy_is_generic_subclass():
