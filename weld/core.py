@@ -626,7 +626,22 @@ def visualize_multi(paths_data, mesh, output_path):
         wire = Line3DCollection(segments, colors="gray",
                                 linewidths=0.4, alpha=0.6)
         ax2.add_collection3d(wire)
-    ax2.auto_scale_xyz(verts[:, 0], verts[:, 1], verts[:, 2])
+    # Equal data limits on all 3 axes so 1mm looks the same in X, Y, and Z.
+    # Pad smaller dimensions symmetrically around their midpoint so the
+    # mesh stays centered without the 3D panel being visually stretched.
+    ax2.set_box_aspect((1.0, 1.0, 1.0))
+    x_mid = 0.5 * float(verts[:, 0].max() + verts[:, 0].min())
+    y_mid = 0.5 * float(verts[:, 1].max() + verts[:, 1].min())
+    z_mid = 0.5 * float(verts[:, 2].max() + verts[:, 2].min())
+    half_span = 0.5 * max(
+        float(verts[:, 0].max() - verts[:, 0].min()),
+        float(verts[:, 1].max() - verts[:, 1].min()),
+        float(verts[:, 2].max() - verts[:, 2].min()),
+        1e-6,
+    )
+    ax2.set_xlim(x_mid - half_span, x_mid + half_span)
+    ax2.set_ylim(y_mid - half_span, y_mid + half_span)
+    ax2.set_zlim(z_mid - half_span, z_mid + half_span)
 
     for idx, path in enumerate(paths_data):
         line_color, arc_color = _PATH_COLORS[idx % len(_PATH_COLORS)]
