@@ -142,45 +142,87 @@ def test_get_strategy_returns_bellmouth():
     assert isinstance(get_strategy("bellmouth"), BellmouthStrategy)
 
 
-def _make_circle_tube_mesh(radius=50.0, tube_r=2.0, n_along=40, n_per_ring=8):
-    """Make a mesh approximating a torus (circle sweep)."""
+def _make_rounded_rect_mesh(half_w=50.0, half_h=50.0, corner_r=10.0, tube_r=1.0,
+                            n_along=120, n_per_ring=6):
+    """Make a mesh approximating a rounded-rectangle sweep."""
+    # Build centerline of rounded rectangle (clockwise starting at top-left tangent)
+    tl = (-half_w + corner_r, half_h - corner_r)
+    tr = (half_w - corner_r, half_h - corner_r)
+    br = (half_w - corner_r, -half_h + corner_r)
+    bl = (-half_w + corner_r, -half_h + corner_r)
+    # Total perimeter: 2(2(half_w-r) + 2(half_h-r)) + 4 * (π/2 r)
+    #                = 4(half_w - r) + 4(half_h - r) + 2πr
+    centerline_pts = []
+    # Top edge: from (-half_w+r, half_h) to (half_w-r, half_h)
+    n_top = max(2, int(n_along * (half_w - corner_r) / (half_w + half_h)))
+    for i in range(n_top):
+        t = i / n_top
+        centerline_pts.append((tl[0] + 2*(half_w - corner_r)*t, half_h))
+    # Top-right arc: 90° → 0°
+    n_arc = max(2, n_along // 12)
+    for i in range(n_arc):
+        a = np.pi/2 - (np.pi/2) * (i / n_arc)
+        centerline_pts.append((tr[0] + corner_r*np.cos(a), tr[1] + corner_r*np.sin(a)))
+    # Right edge
+    for i in range(n_top):
+        t = i / n_top
+        centerline_pts.append((half_w, tr[1] - 2*(half_h - corner_r)*t))
+    # Bottom-right arc: 0° → -90°
+    for i in range(n_arc):
+        a = -(np.pi/2) * (i / n_arc)
+        centerline_pts.append((br[0] + corner_r*np.cos(a), br[1] + corner_r*np.sin(a)))
+    # Bottom edge
+    for i in range(n_top):
+        t = i / n_top
+        centerline_pts.append((br[0] - 2*(half_w - corner_r)*t, -half_h))
+    # Bottom-left arc: -90° → -180°
+    for i in range(n_arc):
+        a = -np.pi/2 - (np.pi/2) * (i / n_arc)
+        centerline_pts.append((bl[0] + corner_r*np.cos(a), bl[1] + corner_r*np.sin(a)))
+    # Left edge
+    for i in range(n_top):
+        t = i / n_top
+        centerline_pts.append((-half_w, bl[1] + 2*(half_h - corner_r)*t))
+    # Top-left arc: 180° → 90°
+    for i in range(n_arc):
+        a = np.pi - (np.pi/2) * (i / n_arc)
+        centerline_pts.append((tl[0] + corner_r*np.cos(a), tl[1] + corner_r*np.sin(a)))
+    centerline_pts = np.array(centerline_pts)
+
+    # Build a thin planar ring: centerline replicated at z=0 and z=tube_r
+    # with triangles connecting the two layers (like the real square_tube weld).
+    n_cl = len(centerline_pts)
     verts = []
+    for cx, cy in centerline_pts:
+        verts.append([cx, cy, 0.0])
+    for cx, cy in centerline_pts:
+        verts.append([cx, cy, tube_r])
     faces = []
-    for i in range(n_along):
-        theta = 2 * np.pi * i / n_along
-        cx = radius * np.cos(theta)
-        cy = radius * np.sin(theta)
-        for j in range(n_per_ring):
-            ang = 2 * np.pi * j / n_per_ring
-            normal = np.array([np.cos(theta), np.sin(theta)])
-            x = cx + tube_r * np.cos(ang) * normal[0]
-            y = cy + tube_r * np.cos(ang) * normal[1]
-            z = tube_r * np.sin(ang)
-            verts.append([x, y, z])
-    for i in range(n_along):
-        i_next = (i + 1) % n_along
-        for j in range(n_per_ring):
-            jn = (j + 1) % n_per_ring
-            v0 = i * n_per_ring + j
-            v1 = i * n_per_ring + jn
-            v2 = i_next * n_per_ring + j
-            v3 = i_next * n_per_ring + jn
-            faces.append([v0, v1, v2])
-            faces.append([v1, v3, v2])
+    for i in range(n_cl):
+        i_next = (i + 1) % n_cl
+        v0 = i
+        v1 = i_next
+        v2 = i + n_cl
+        v3 = i_next + n_cl
+        faces.append([v0, v1, v2])
+        faces.append([v1, v3, v2])
     return trimesh.Trimesh(vertices=verts, faces=np.array(faces))
 
 
-def test_square_tube_strategy_fits_four_arcs():
+def test_square_tube_strategy_fits_rounded_rect():
     from weld.strategies.square_tube import SquareTubeStrategy
-    mesh = _make_circle_tube_mesh(radius=50.0, tube_r=2.0)
+    mesh = _make_rounded_rect_mesh(half_w=50.0, half_h=50.0, corner_r=10.0)
     paths = SquareTubeStrategy().process(mesh)
     assert len(paths) == 1
     path = paths[0]
     assert path["closed"] is True
-    assert len(path["fitted"]) == 4
+    assert len(path["fitted"]) == 8
+    types = [s["type"] for s in path["fitted"]]
+    assert types.count("line") == 4
+    assert types.count("arc") == 4
+    # Alternating line/arc
+    assert types == ["line", "arc", "line", "arc", "line", "arc", "line", "arc"]
     for seg in path["fitted"]:
-        assert seg["type"] == "arc"
-        # Circle fit on dense ring should have small error
         assert seg["fitting_error_mm"] < 3.0
 
 
