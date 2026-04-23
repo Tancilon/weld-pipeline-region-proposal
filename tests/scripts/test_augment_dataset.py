@@ -1,5 +1,6 @@
 """Tests for scripts/augment_dataset.py."""
 
+import json
 import os
 
 # EXR support must be enabled before cv2 is imported anywhere in the test process.
@@ -504,3 +505,51 @@ def test_compute_quotas_uniform():
     quotas = compute_quotas_uniform(coco, num_aug=5)
     assert sum(quotas.values()) == 7 * 5
     assert all(q == 5 for q in quotas.values())
+
+
+from scripts.augment_dataset import read_source_meta, write_augmented_meta, copy_dataset_files
+
+
+def test_read_source_meta_returns_intrinsics_and_annotation(tmp_path):
+    meta_dir = tmp_path / "meta"
+    meta_dir.mkdir()
+    sample = {
+        "camera": {"intrinsics": {
+            "fx": 1171.28, "fy": 1170.44, "cx": 970.16, "cy": 542.53,
+            "width": 1920, "height": 1080}},
+        "annotation": {"class_name": "fangguan", "dimensions": [0.22, 0.21, 0.22]},
+    }
+    (meta_dir / "img1.json").write_text(json.dumps(sample))
+    K, W, H, annotation = read_source_meta(meta_dir, "img1.png")
+    assert K[0, 0] == pytest.approx(1171.28)
+    assert K[0, 2] == pytest.approx(970.16)
+    assert (W, H) == (1920, 1080)
+    assert annotation["class_name"] == "fangguan"
+
+
+def test_write_augmented_meta_schema(tmp_path):
+    out_dir = tmp_path / "meta"
+    out_dir.mkdir()
+    K = _K(100.0, 110.0, 50.0, 40.0)
+    annotation = {"class_name": "gaiban", "dimensions": [1.0, 2.0, 3.0]}
+    write_augmented_meta(out_dir, "AUG_train_0000.png", K=K, W=1920, H=1080, annotation=annotation)
+    data = json.loads((out_dir / "AUG_train_0000.json").read_text())
+    assert data["camera"]["intrinsics"]["fx"] == pytest.approx(100.0)
+    assert data["camera"]["intrinsics"]["cx"] == pytest.approx(50.0)
+    assert data["camera"]["intrinsics"]["width"] == 1920
+    assert data["annotation"]["class_name"] == "gaiban"
+    assert data["annotation"]["dimensions"] == [1.0, 2.0, 3.0]
+
+
+def test_copy_dataset_files_copies_all_three_dirs(tmp_path):
+    src = tmp_path / "in"
+    dst = tmp_path / "out"
+    for sub in ("images", "depth", "meta"):
+        (src / sub).mkdir(parents=True)
+    (src / "images" / "a.png").write_bytes(b"fake")
+    (src / "depth" / "a.exr").write_bytes(b"fakedepth")
+    (src / "meta" / "a.json").write_text("{}")
+    copy_dataset_files(src, dst)
+    assert (dst / "images" / "a.png").read_bytes() == b"fake"
+    assert (dst / "depth" / "a.exr").read_bytes() == b"fakedepth"
+    assert (dst / "meta" / "a.json").read_text() == "{}"

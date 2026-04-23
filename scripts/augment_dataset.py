@@ -6,6 +6,7 @@ import os
 import random
 import shutil
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional, Tuple
 
 # EXR support must be enabled before cv2 is imported.
@@ -87,6 +88,58 @@ def compose_K(
     if tx != 0.0 or ty != 0.0:
         K = update_K_translate(K, tx=tx, ty=ty)
     return K, W, H
+
+
+def read_source_meta(meta_dir, image_filename: str):
+    """Load meta/<stem>.json; return (K, W, H, annotation_dict)."""
+    stem = os.path.splitext(image_filename)[0]
+    meta_path = Path(meta_dir) / f"{stem}.json"
+    with open(meta_path) as f:
+        d = json.load(f)
+    i = d["camera"]["intrinsics"]
+    K = np.array([
+        [i["fx"], 0.0, i["cx"]],
+        [0.0, i["fy"], i["cy"]],
+        [0.0, 0.0, 1.0],
+    ], dtype=np.float64)
+    return K, int(i["width"]), int(i["height"]), d["annotation"]
+
+
+def write_augmented_meta(meta_dir, image_filename: str, K, W: int, H: int, annotation: dict) -> None:
+    """Write meta/<stem>.json matching the source schema."""
+    stem = os.path.splitext(image_filename)[0]
+    out = {
+        "camera": {"intrinsics": {
+            "fx": float(K[0, 0]),
+            "fy": float(K[1, 1]),
+            "cx": float(K[0, 2]),
+            "cy": float(K[1, 2]),
+            "width": int(W),
+            "height": int(H),
+        }},
+        "annotation": {
+            "class_name": annotation["class_name"],
+            "dimensions": list(annotation["dimensions"]),
+        },
+    }
+    out_path = Path(meta_dir) / f"{stem}.json"
+    with open(out_path, "w") as f:
+        json.dump(out, f, ensure_ascii=False, indent=2)
+
+
+def copy_dataset_files(input_dir, output_dir) -> None:
+    """Copy images/, depth/, meta/ directories wholesale from input to output."""
+    input_dir = Path(input_dir)
+    output_dir = Path(output_dir)
+    for sub in ("images", "depth", "meta"):
+        src_sub = input_dir / sub
+        dst_sub = output_dir / sub
+        dst_sub.mkdir(parents=True, exist_ok=True)
+        if not src_sub.exists():
+            continue
+        for entry in src_sub.iterdir():
+            if entry.is_file():
+                shutil.copy2(entry, dst_sub / entry.name)
 
 
 def sample_geom_params(width: int, height: int, rng: random.Random) -> GeomParams:
