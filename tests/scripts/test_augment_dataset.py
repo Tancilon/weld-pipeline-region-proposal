@@ -237,3 +237,62 @@ def test_sample_geom_params_ranges():
         if p.resize_to is not None:
             # crop+resize always brings output back to source size
             assert p.resize_to == (1920, 1080)
+
+
+from scripts.augment_dataset import apply_geom
+
+
+def _synthetic_sample(W=32, H=24):
+    rgb = np.zeros((H, W, 3), dtype=np.uint8)
+    rgb[:, :W // 2] = 200  # left half bright, right half dark
+    mask = np.zeros((H, W), dtype=np.uint8)
+    mask[H // 4 : 3 * H // 4, W // 4 : 3 * W // 4] = 1
+    depth = np.full((H, W), 1.5, dtype=np.float32)
+    depth[:, W // 2:] = 2.5  # left 1.5m, right 2.5m
+    K = _K(fx=20.0, fy=20.0, cx=W / 2 - 0.5, cy=H / 2 - 0.5)
+    return rgb, mask, depth, K
+
+
+def test_apply_geom_identity():
+    rgb, mask, depth, K = _synthetic_sample()
+    params = GeomParams(flip=False, crop_box=None, resize_to=None, translate=(0.0, 0.0))
+    rgb2, mask2, depth2, K2 = apply_geom(rgb, mask, depth, K, params)
+    np.testing.assert_array_equal(rgb2, rgb)
+    np.testing.assert_array_equal(mask2, mask)
+    np.testing.assert_allclose(depth2, depth)
+    np.testing.assert_allclose(K2, K)
+
+
+def test_apply_geom_flip_swaps_bright_half():
+    rgb, mask, depth, K = _synthetic_sample()
+    params = GeomParams(flip=True, crop_box=None, resize_to=None, translate=(0.0, 0.0))
+    rgb2, mask2, depth2, K2 = apply_geom(rgb, mask, depth, K, params)
+    # After flip, bright half is now on the right
+    assert rgb2[:, -1, 0].mean() > 100
+    assert rgb2[:, 0, 0].mean() < 50
+    # Depth on the left was 2.5 (it was the right half originally)
+    assert depth2[:, 0].mean() == pytest.approx(2.5)
+    assert depth2[:, -1].mean() == pytest.approx(1.5)
+
+
+def test_apply_geom_crop_resize_preserves_shape():
+    rgb, mask, depth, K = _synthetic_sample()
+    params = GeomParams(
+        flip=False, crop_box=(2, 2, 28, 20), resize_to=(32, 24), translate=(0.0, 0.0)
+    )
+    rgb2, mask2, depth2, K2 = apply_geom(rgb, mask, depth, K, params)
+    assert rgb2.shape == rgb.shape
+    assert mask2.shape == mask.shape
+    assert depth2.shape == depth.shape
+
+
+def test_apply_geom_translate_fills_zero_borders():
+    rgb, mask, depth, K = _synthetic_sample()
+    params = GeomParams(
+        flip=False, crop_box=None, resize_to=None, translate=(3.0, 0.0)
+    )
+    rgb2, mask2, depth2, K2 = apply_geom(rgb, mask, depth, K, params)
+    # First 3 columns should be zeros on all three channels
+    assert rgb2[:, :3].sum() == 0
+    assert mask2[:, :3].sum() == 0
+    assert (depth2[:, :3] == 0).all()

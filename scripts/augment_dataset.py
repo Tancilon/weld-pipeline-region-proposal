@@ -118,6 +118,65 @@ def sample_geom_params(width: int, height: int, rng: random.Random) -> GeomParam
     return GeomParams(flip=flip, crop_box=crop_box, resize_to=resize_to, translate=(tx, ty))
 
 
+def apply_geom(
+    rgb: np.ndarray,
+    mask: np.ndarray,
+    depth: np.ndarray,
+    K: np.ndarray,
+    params: GeomParams,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Apply params to (rgb, mask, depth) consistently and propagate K.
+
+    RGB uses linear interpolation, mask and depth use nearest neighbor
+    (nearest prevents flying pixels at depth discontinuities). Borders
+    revealed by translate fill with zero.
+    """
+    H, W = rgb.shape[:2]
+    assert mask.shape == (H, W), f"mask shape {mask.shape} != rgb HxW {(H, W)}"
+    assert depth.shape == (H, W), f"depth shape {depth.shape} != rgb HxW {(H, W)}"
+
+    # Canonical order: flip -> crop -> resize -> translate
+    if params.flip:
+        rgb = np.ascontiguousarray(rgb[:, ::-1])
+        mask = np.ascontiguousarray(mask[:, ::-1])
+        depth = np.ascontiguousarray(depth[:, ::-1])
+
+    if params.crop_box is not None:
+        x0, y0, w_crop, h_crop = params.crop_box
+        rgb = rgb[y0:y0 + h_crop, x0:x0 + w_crop]
+        mask = mask[y0:y0 + h_crop, x0:x0 + w_crop]
+        depth = depth[y0:y0 + h_crop, x0:x0 + w_crop]
+
+    if params.resize_to is not None:
+        dst_w, dst_h = params.resize_to
+        rgb = cv2.resize(rgb, (dst_w, dst_h), interpolation=cv2.INTER_LINEAR)
+        mask = cv2.resize(mask, (dst_w, dst_h), interpolation=cv2.INTER_NEAREST)
+        depth = cv2.resize(depth, (dst_w, dst_h), interpolation=cv2.INTER_NEAREST)
+
+    tx, ty = params.translate
+    if tx != 0.0 or ty != 0.0:
+        H_cur, W_cur = rgb.shape[:2]
+        M = np.array([[1.0, 0.0, tx], [0.0, 1.0, ty]], dtype=np.float32)
+        rgb = cv2.warpAffine(
+            rgb, M, (W_cur, H_cur),
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT, borderValue=0,
+        )
+        mask = cv2.warpAffine(
+            mask, M, (W_cur, H_cur),
+            flags=cv2.INTER_NEAREST,
+            borderMode=cv2.BORDER_CONSTANT, borderValue=0,
+        )
+        depth = cv2.warpAffine(
+            depth, M, (W_cur, H_cur),
+            flags=cv2.INTER_NEAREST,
+            borderMode=cv2.BORDER_CONSTANT, borderValue=0.0,
+        )
+
+    K_out, _, _ = compose_K(K, width=W, height=H, params=params)
+    return rgb, mask, depth, K_out
+
+
 def mask_to_polygons(mask: np.ndarray, min_area: float = 50.0) -> list[list[float]]:
     contours, _ = cv2.findContours(
         mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
