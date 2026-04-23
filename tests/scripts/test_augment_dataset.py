@@ -1,10 +1,23 @@
+"""Tests for scripts/augment_dataset.py."""
+
+import os
+
+# EXR support must be enabled before cv2 is imported anywhere in the test process.
+os.environ.setdefault("OPENCV_IO_ENABLE_OPENEXR", "1")
+
 import numpy as np
 import sys
-import os
+import pytest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
-from scripts.augment_dataset import mask_to_polygons
+from scripts.augment_dataset import (
+    mask_to_polygons,
+    update_K_flip,
+    update_K_crop,
+    update_K_resize,
+    update_K_translate,
+)
 
 
 def test_mask_to_polygons_simple_square():
@@ -86,3 +99,52 @@ def test_augment_single_image_returns_none_on_impossible():
     transform = build_transform(height=100, width=200)
     result = augment_single_image(image, mask, original_area, transform, max_retries=3, min_area_ratio=0.1)
     assert result is None
+
+
+def _K(fx, fy, cx, cy):
+    return np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=np.float64)
+
+
+def test_update_K_flip():
+    K = _K(100.0, 110.0, 30.0, 40.0)
+    K2 = update_K_flip(K, width=100)
+    assert K2[0, 0] == 100.0
+    assert K2[1, 1] == 110.0
+    assert K2[0, 2] == pytest.approx(100 - 1 - 30.0)  # W-1-cx
+    assert K2[1, 2] == 40.0
+
+
+def test_update_K_crop():
+    K = _K(100.0, 110.0, 30.0, 40.0)
+    K2 = update_K_crop(K, x0=5, y0=7)
+    assert K2[0, 0] == 100.0
+    assert K2[1, 1] == 110.0
+    assert K2[0, 2] == pytest.approx(30.0 - 5)
+    assert K2[1, 2] == pytest.approx(40.0 - 7)
+
+
+def test_update_K_resize_half_pixel():
+    K = _K(100.0, 100.0, 10.0, 20.0)
+    # shrink 100->50, scale=0.5
+    K2 = update_K_resize(K, src_w=100, src_h=100, dst_w=50, dst_h=50)
+    assert K2[0, 0] == pytest.approx(50.0)
+    assert K2[1, 1] == pytest.approx(50.0)
+    # cx' = (cx + 0.5) * sx - 0.5 = (10.5) * 0.5 - 0.5 = 4.75
+    assert K2[0, 2] == pytest.approx(4.75)
+    # cy' = (20.5) * 0.5 - 0.5 = 9.75
+    assert K2[1, 2] == pytest.approx(9.75)
+
+
+def test_update_K_resize_identity():
+    K = _K(100.0, 110.0, 30.0, 40.0)
+    K2 = update_K_resize(K, src_w=100, src_h=100, dst_w=100, dst_h=100)
+    np.testing.assert_allclose(K2, K)
+
+
+def test_update_K_translate():
+    K = _K(100.0, 110.0, 30.0, 40.0)
+    K2 = update_K_translate(K, tx=3.0, ty=-2.0)
+    assert K2[0, 0] == 100.0
+    assert K2[1, 1] == 110.0
+    assert K2[0, 2] == pytest.approx(33.0)
+    assert K2[1, 2] == pytest.approx(38.0)

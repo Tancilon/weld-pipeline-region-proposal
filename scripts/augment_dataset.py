@@ -5,12 +5,50 @@ import logging
 import os
 import shutil
 
+# EXR support must be enabled before cv2 is imported.
+os.environ.setdefault("OPENCV_IO_ENABLE_OPENEXR", "1")
+
 import cv2
 import numpy as np
 import albumentations as A
 from pycocotools.coco import COCO
 
 logger = logging.getLogger(__name__)
+
+
+def update_K_flip(K: np.ndarray, width: int) -> np.ndarray:
+    """Horizontal flip: cx' = W - 1 - cx; fx/fy/cy unchanged."""
+    K2 = K.copy()
+    K2[0, 2] = (width - 1) - K[0, 2]
+    return K2
+
+
+def update_K_crop(K: np.ndarray, x0: int, y0: int) -> np.ndarray:
+    """Crop with top-left (x0, y0): cx -= x0, cy -= y0; fx/fy unchanged."""
+    K2 = K.copy()
+    K2[0, 2] = K[0, 2] - x0
+    K2[1, 2] = K[1, 2] - y0
+    return K2
+
+
+def update_K_resize(K: np.ndarray, src_w: int, src_h: int, dst_w: int, dst_h: int) -> np.ndarray:
+    """Resize src_w x src_h -> dst_w x dst_h. Uses pixel-center-aligned scaling."""
+    sx = dst_w / src_w
+    sy = dst_h / src_h
+    K2 = K.copy()
+    K2[0, 0] = K[0, 0] * sx
+    K2[1, 1] = K[1, 1] * sy
+    K2[0, 2] = (K[0, 2] + 0.5) * sx - 0.5
+    K2[1, 2] = (K[1, 2] + 0.5) * sy - 0.5
+    return K2
+
+
+def update_K_translate(K: np.ndarray, tx: float, ty: float) -> np.ndarray:
+    """Pixel-space translate (tx right, ty down): cx += tx, cy += ty."""
+    K2 = K.copy()
+    K2[0, 2] = K[0, 2] + tx
+    K2[1, 2] = K[1, 2] + ty
+    return K2
 
 
 def mask_to_polygons(mask: np.ndarray, min_area: float = 50.0) -> list[list[float]]:
