@@ -794,7 +794,7 @@ def is_depth_safe(aug_depth: np.ndarray, original_depth: np.ndarray, min_ratio: 
     """Require at least min_ratio * source-valid-pixel-count non-zero pixels in aug_depth."""
     src_valid = int(np.count_nonzero(original_depth))
     if src_valid == 0:
-        return False
+        return True  # all-zero source: pass through (sensor data unavailable)
     aug_valid = int(np.count_nonzero(aug_depth))
     return (aug_valid / src_valid) >= min_ratio
 ```

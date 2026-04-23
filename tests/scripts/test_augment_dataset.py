@@ -408,6 +408,13 @@ def test_is_depth_safe_rejects_mostly_invalid():
     assert is_depth_safe(aug_depth=aug, original_depth=src, min_ratio=0.1) is False
 
 
+def test_is_depth_safe_src_all_zero_passes():
+    """Source depth entirely zero (sensor data unavailable) should not block augmentation."""
+    src = np.zeros((10, 10), dtype=np.float32)
+    aug = np.zeros((10, 10), dtype=np.float32)
+    assert is_depth_safe(aug_depth=aug, original_depth=src, min_ratio=0.1) is True
+
+
 from types import SimpleNamespace
 
 from scripts.augment_dataset import compute_quotas_balanced, compute_quotas_uniform

@@ -658,6 +658,12 @@ def _augment_named_split(input_dir, output_dir, split: str, quotas: dict, seed: 
         if depth.ndim == 3:
             depth = depth[:, :, 0]
         depth = _sanitize_depth(depth.astype(np.float32, copy=False))
+        # Some depth maps are stored at a lower resolution than the RGB image.
+        # Resize with nearest-neighbour to preserve the physical depth values
+        # (no interpolation artefacts at foreground/background boundaries).
+        rgb_h, rgb_w = rgb.shape[:2]
+        if depth.shape != (rgb_h, rgb_w):
+            depth = cv2.resize(depth, (rgb_w, rgb_h), interpolation=cv2.INTER_NEAREST)
         ann_ids = coco.getAnnIds(imgIds=img_info["id"])
         if not ann_ids:
             continue
