@@ -1,4 +1,14 @@
-"""Offline data augmentation for AIWS5.2 COCO segmentation dataset."""
+"""Offline data augmentation for AIWS5.2 COCO seg+pose dataset.
+
+Supports two modes:
+  * --target_per_category N : balance each non-empty train category to N samples,
+    producing geometrically-consistent (RGB, mask, depth, meta-K) quadruples.
+    Only the train split is augmented; val/test pass through unchanged.
+  * --num_aug N (legacy) : apply uniform N augmentations per image, to train+val.
+
+See docs/superpowers/specs/2026-04-22-train-category-balance-augment-design.md
+for the full design rationale (operator choice, K-propagation formulas, etc.).
+"""
 
 import argparse
 import json
@@ -276,10 +286,15 @@ def is_mask_safe(aug_area: float, original_area: float, min_ratio: float = 0.1) 
 
 
 def is_depth_safe(aug_depth: np.ndarray, original_depth: np.ndarray, min_ratio: float = 0.1) -> bool:
-    """Require at least min_ratio * source-valid-pixel-count non-zero pixels in aug_depth."""
+    """Require at least min_ratio * source-valid-pixel-count non-zero pixels in aug_depth.
+
+    If the source depth is entirely zero (sensor data unavailable for this image),
+    the check passes unconditionally — the augmented depth will also be zero, which
+    faithfully represents the source and should not block augmentation.
+    """
     src_valid = int(np.count_nonzero(original_depth))
     if src_valid == 0:
-        return False
+        return True  # No depth data in source; pass through without penalising
     aug_valid = int(np.count_nonzero(aug_depth))
     return (aug_valid / src_valid) >= min_ratio
 
@@ -442,6 +457,12 @@ def augment_train_split(
             depth = depth[:, :, 0]
         depth = depth.astype(np.float32, copy=False)
         depth = _sanitize_depth(depth)
+        # Some depth maps are stored at a lower resolution than the RGB image.
+        # Resize with nearest-neighbour to preserve the physical depth values
+        # (no interpolation artefacts at foreground/background boundaries).
+        rgb_h, rgb_w = rgb.shape[:2]
+        if depth.shape != (rgb_h, rgb_w):
+            depth = cv2.resize(depth, (rgb_w, rgb_h), interpolation=cv2.INTER_NEAREST)
 
         ann_ids = coco.getAnnIds(imgIds=img_id)
         if not ann_ids:
