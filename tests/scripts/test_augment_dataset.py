@@ -6,6 +6,7 @@ import os
 # EXR support must be enabled before cv2 is imported anywhere in the test process.
 os.environ.setdefault("OPENCV_IO_ENABLE_OPENEXR", "1")
 
+import cv2
 import numpy as np
 import sys
 import pytest
@@ -553,3 +554,119 @@ def test_copy_dataset_files_copies_all_three_dirs(tmp_path):
     assert (dst / "images" / "a.png").read_bytes() == b"fake"
     assert (dst / "depth" / "a.exr").read_bytes() == b"fakedepth"
     assert (dst / "meta" / "a.json").read_text() == "{}"
+
+
+from pycocotools.coco import COCO
+from scripts.augment_dataset import augment_train_split
+
+
+def _write_png(path, W=64, H=48, color=(120, 200, 80)):
+    img = np.zeros((H, W, 3), dtype=np.uint8)
+    img[:] = color
+    cv2.imwrite(str(path), img)
+
+
+def _write_exr(path, W=64, H=48, value=1.5):
+    depth = np.full((H, W), value, dtype=np.float32)
+    cv2.imwrite(str(path), depth)
+
+
+def _write_meta(path, W=64, H=48, class_name="gaiban"):
+    meta = {
+        "camera": {"intrinsics": {
+            "fx": 40.0, "fy": 40.0, "cx": W / 2 - 0.5, "cy": H / 2 - 0.5,
+            "width": W, "height": H}},
+        "annotation": {"class_name": class_name, "dimensions": [1.0, 1.0, 1.0]},
+    }
+    path.write_text(json.dumps(meta))
+
+
+def _build_mini_dataset(tmp_path):
+    d = tmp_path / "mini"
+    for sub in ("images", "depth", "meta", "annotations"):
+        (d / sub).mkdir(parents=True)
+
+    # 2 categories, 2 images each
+    images = []
+    anns = []
+    for idx, (cat_id, class_name) in enumerate([(1, "gaiban"), (1, "gaiban"), (2, "fangguan"), (2, "fangguan")]):
+        fname = f"img{idx}.png"
+        _write_png(d / "images" / fname)
+        _write_exr(d / "depth" / f"img{idx}.exr")
+        _write_meta(d / "meta" / f"img{idx}.json", class_name=class_name)
+        images.append({
+            "license": "", "url": "", "file_name": fname,
+            "height": 48, "width": 64, "date_captured": "", "id": idx,
+        })
+        # rectangle mask covering most of the image
+        seg_poly = [10.0, 10.0, 54.0, 10.0, 54.0, 38.0, 10.0, 38.0]
+        anns.append({
+            "iscrowd": False, "image_id": idx, "image_name": fname,
+            "category_id": cat_id, "id": idx,
+            "segmentation": [seg_poly],
+            "area": 44.0 * 28.0,
+            "bbox": [10.0, 10.0, 44.0, 28.0],
+        })
+
+    coco_dict = {
+        "info": {}, "licenses": [],
+        "categories": [
+            {"id": 1, "name": "gaiban", "supercategory": None},
+            {"id": 2, "name": "fangguan", "supercategory": None},
+        ],
+        "images": images, "annotations": anns,
+    }
+    (d / "annotations" / "train.json").write_text(json.dumps(coco_dict))
+    # also write val/test so copy_dataset_files has something to handle
+    (d / "annotations" / "val.json").write_text(json.dumps({
+        **coco_dict, "images": [], "annotations": []}))
+    (d / "annotations" / "test.json").write_text(json.dumps({
+        **coco_dict, "images": [], "annotations": []}))
+    return d
+
+
+def test_augment_train_split_end_to_end(tmp_path):
+    src = _build_mini_dataset(tmp_path)
+    out = tmp_path / "out"
+
+    # target=5 per category -> each category needs 3 more from its 2 images
+    coco = COCO(str(src / "annotations" / "train.json"))
+    quotas = compute_quotas_balanced(coco, target=5, rng=random.Random(0))
+    augment_train_split(input_dir=src, output_dir=out, quotas=quotas, seed=0)
+
+    # Check output layout
+    for sub in ("images", "depth", "meta"):
+        assert (out / sub).is_dir()
+    assert (out / "annotations" / "train.json").is_file()
+    assert (out / "annotations" / "val.json").is_file()
+    assert (out / "annotations" / "test.json").is_file()
+
+    # Re-load augmented train.json and verify category counts
+    aug = COCO(str(out / "annotations" / "train.json"))
+    counts = {1: 0, 2: 0}
+    for a in aug.dataset["annotations"]:
+        counts[a["category_id"]] = counts.get(a["category_id"], 0) + 1
+    assert counts[1] == 5
+    assert counts[2] == 5
+
+    # Every augmented sample has matching png / exr / json
+    for img in aug.dataset["images"]:
+        fname = img["file_name"]
+        if not fname.startswith("AUG_"):
+            continue
+        stem = os.path.splitext(fname)[0]
+        assert (out / "images" / f"{stem}.png").is_file()
+        assert (out / "depth" / f"{stem}.exr").is_file()
+        assert (out / "meta" / f"{stem}.json").is_file()
+        # meta schema
+        mdata = json.loads((out / "meta" / f"{stem}.json").read_text())
+        assert set(mdata["camera"]["intrinsics"].keys()) == {
+            "fx", "fy", "cx", "cy", "width", "height"}
+        assert "class_name" in mdata["annotation"]
+        assert "dimensions" in mdata["annotation"]
+
+    # source_image_id present and valid
+    orig_ids = {img["id"] for img in aug.dataset["images"] if not img["file_name"].startswith("AUG_")}
+    for a in aug.dataset["annotations"]:
+        if a["id"] >= 100000:  # augmented
+            assert a["source_image_id"] in orig_ids

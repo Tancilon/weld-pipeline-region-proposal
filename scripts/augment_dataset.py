@@ -472,6 +472,210 @@ def augment_split(
     )
 
 
+def _sanitize_depth(depth: np.ndarray, max_meters: float = 4.0) -> np.ndarray:
+    """Match datasets_nuclear.py:186-191: NaN/Inf/<0/>max_meters -> 0."""
+    invalid = ~np.isfinite(depth)
+    invalid |= depth < 0
+    invalid |= depth > max_meters
+    if np.any(invalid):
+        depth = depth.copy()
+        depth[invalid] = 0
+    return depth
+
+
+def _try_generate_augmented_sample(
+    rgb, mask, depth, K, W, H, original_area,
+    color_transform, rng: random.Random, max_retries: int,
+):
+    """Sample GeomParams, apply full pipeline, check safety, retry on failure.
+
+    Returns the augmented quadruple + derived polygons/bbox/area, or None if
+    every retry fails.
+    """
+    for _ in range(max_retries):
+        params = sample_geom_params(width=W, height=H, rng=rng)
+        rgb_g, mask_g, depth_g, K_g = apply_geom(rgb, mask, depth, K, params)
+        # Color jitter (RGB only)
+        rgb_g = color_transform(image=rgb_g)["image"]
+        # Re-sanitize depth after geometric ops
+        depth_g = _sanitize_depth(depth_g)
+
+        polygons = mask_to_polygons(mask_g, min_area=50.0)
+        if not polygons:
+            continue
+        bbox, area = compute_bbox_area(polygons)
+        if not is_mask_safe(aug_area=area, original_area=original_area, min_ratio=0.1):
+            continue
+        if not is_depth_safe(aug_depth=depth_g, original_depth=depth, min_ratio=0.1):
+            continue
+        H_out, W_out = rgb_g.shape[:2]
+        return rgb_g, mask_g, depth_g, K_g, W_out, H_out, polygons, bbox, area
+    return None
+
+
+def augment_train_split(
+    input_dir,
+    output_dir,
+    quotas: dict,
+    seed: int = 42,
+) -> None:
+    """Augment the train split of a COCO dataset per pre-computed quotas.
+
+    - Copies images/, depth/, meta/ and val/test annotations to output_dir.
+    - For each source train image with quota > 0, generates that many augmented
+      quadruples (RGB, mask, depth, meta-K), appending COCO entries.
+    """
+    input_dir = Path(input_dir)
+    output_dir = Path(output_dir)
+    if input_dir.resolve() == output_dir.resolve():
+        raise ValueError(
+            f"input_dir and output_dir must differ; got {input_dir}"
+        )
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "annotations").mkdir(parents=True, exist_ok=True)
+
+    # 1) Copy images/, depth/, meta/ wholesale
+    copy_dataset_files(input_dir, output_dir)
+
+    # 2) Copy val/test annotations as-is
+    for split in ("val", "test"):
+        src = input_dir / "annotations" / f"{split}.json"
+        if src.is_file():
+            shutil.copy2(src, output_dir / "annotations" / f"{split}.json")
+
+    # 3) Process train split
+    train_ann = input_dir / "annotations" / "train.json"
+    with open(train_ann) as f:
+        coco_data = json.load(f)
+    coco = COCO(str(train_ann))
+
+    color_transform = build_color_transform()
+    rng = random.Random(seed)
+    np.random.seed(seed)
+
+    aug_images = []
+    aug_annotations = []
+    aug_img_id = 100000
+    aug_ann_id = 100000
+    aug_file_counter = 0
+
+    total_quota = sum(quotas.values())
+    produced = 0
+    logger.info(f"train split: {len(coco_data['images'])} source images, total quota {total_quota}")
+
+    for img_info in coco_data["images"]:
+        img_id = img_info["id"]
+        quota = quotas.get(img_id, 0)
+        if quota == 0:
+            continue
+
+        # Load source RGB + mask + depth + K + annotation (meta)
+        fname = img_info["file_name"]
+        stem = os.path.splitext(fname)[0]
+        rgb_path = input_dir / "images" / fname
+        depth_path = input_dir / "depth" / f"{stem}.exr"
+        rgb = cv2.imread(str(rgb_path), cv2.IMREAD_COLOR)
+        if rgb is None:
+            logger.warning(f"cannot read {rgb_path}, skipping")
+            continue
+        rgb = cv2.cvtColor(rgb, cv2.COLOR_BGR2RGB)
+
+        depth = cv2.imread(str(depth_path), cv2.IMREAD_ANYCOLOR | cv2.IMREAD_ANYDEPTH)
+        if depth is None:
+            logger.warning(f"cannot read {depth_path}, skipping")
+            continue
+        if depth.ndim == 3:
+            depth = depth[:, :, 0]
+        depth = depth.astype(np.float32, copy=False)
+        depth = _sanitize_depth(depth)
+
+        ann_ids = coco.getAnnIds(imgIds=img_id)
+        if not ann_ids:
+            logger.warning(f"no annotation for image_id={img_id}, skipping")
+            continue
+        ann = coco.loadAnns(ann_ids)[0]
+        mask = coco.annToMask(ann).astype(np.uint8)
+        original_area = ann["area"]
+
+        try:
+            K, W, H, meta_annotation = read_source_meta(input_dir / "meta", fname)
+        except FileNotFoundError:
+            logger.warning(f"no meta for {fname}, skipping")
+            continue
+
+        for slot in range(quota):
+            out_sample = _try_generate_augmented_sample(
+                rgb, mask, depth, K, W, H, original_area,
+                color_transform, rng, max_retries=5,
+            )
+            if out_sample is None:
+                logger.warning(
+                    f"image_id={img_id} slot {slot+1}/{quota}: all retries failed; dropping"
+                )
+                continue
+            aug_rgb, aug_mask, aug_depth, aug_K, aug_W, aug_H, polygons, bbox, area = out_sample
+
+            aug_filename = f"AUG_train_{aug_file_counter:04d}.png"
+            aug_file_counter += 1
+
+            # Save RGB
+            cv2.imwrite(
+                str(output_dir / "images" / aug_filename),
+                cv2.cvtColor(aug_rgb, cv2.COLOR_RGB2BGR),
+            )
+            # Save depth
+            cv2.imwrite(
+                str(output_dir / "depth" / f"{os.path.splitext(aug_filename)[0]}.exr"),
+                aug_depth,
+            )
+            # Save meta
+            write_augmented_meta(
+                output_dir / "meta", aug_filename,
+                K=aug_K, W=aug_W, H=aug_H, annotation=meta_annotation,
+            )
+
+            aug_images.append({
+                "license": img_info.get("license", ""),
+                "url": "",
+                "file_name": aug_filename,
+                "height": int(aug_H),
+                "width": int(aug_W),
+                "date_captured": "",
+                "id": aug_img_id,
+            })
+            aug_annotations.append({
+                "iscrowd": False,
+                "image_id": aug_img_id,
+                "image_name": aug_filename,
+                "category_id": ann["category_id"],
+                "id": aug_ann_id,
+                "segmentation": polygons,
+                "area": area,
+                "bbox": bbox,
+                "source_image_id": img_id,
+            })
+            aug_img_id += 1
+            aug_ann_id += 1
+            produced += 1
+
+    # Merge and write train.json
+    merged = {
+        "info": coco_data.get("info", {}),
+        "licenses": coco_data.get("licenses", []),
+        "categories": coco_data["categories"],
+        "images": coco_data["images"] + aug_images,
+        "annotations": coco_data["annotations"] + aug_annotations,
+    }
+    with open(output_dir / "annotations" / "train.json", "w") as f:
+        json.dump(merged, f, ensure_ascii=False, indent=2)
+
+    logger.info(
+        f"train split done. Originals: {len(coco_data['images'])}, "
+        f"augmented: {produced}/{total_quota}, total: {len(merged['images'])}."
+    )
+
+
 def main():
     import argparse
 
