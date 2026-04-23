@@ -494,15 +494,20 @@ def augment_train_split(
             aug_file_counter += 1
 
             # Save RGB
-            cv2.imwrite(
+            ok_rgb = cv2.imwrite(
                 str(output_dir / "images" / aug_filename),
                 cv2.cvtColor(aug_rgb, cv2.COLOR_RGB2BGR),
             )
             # Save depth
-            cv2.imwrite(
+            ok_depth = cv2.imwrite(
                 str(output_dir / "depth" / f"{os.path.splitext(aug_filename)[0]}.exr"),
                 aug_depth,
             )
+            if not (ok_rgb and ok_depth):
+                logger.warning(
+                    f"cv2.imwrite failed for {aug_filename}; skipping this sample."
+                )
+                continue
             # Save meta
             write_augmented_meta(
                 output_dir / "meta", aug_filename,
@@ -561,9 +566,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--target_per_category", type=int, default=None,
                    help="If set, balance each non-empty train category to this count "
                         "(only the train split is augmented).")
-    p.add_argument("--num_aug", type=int, default=3,
+    p.add_argument("--num_aug", type=int, default=None,
                    help="Legacy uniform multiplier (applied to train+val when "
-                        "--target_per_category is not set).")
+                        "--target_per_category is not set). "
+                        "Default: None (must specify --target_per_category or --num_aug).")
     p.add_argument("--seed", type=int, default=42, help="Random seed.")
     return p
 
@@ -580,6 +586,12 @@ def main() -> None:
     output_dir = Path(args.output_dir)
     if input_dir.resolve() == output_dir.resolve():
         raise SystemExit("ERROR: --input_dir and --output_dir must differ.")
+
+    if args.target_per_category is None and args.num_aug is None:
+        raise SystemExit(
+            "ERROR: specify either --target_per_category N (balanced mode) "
+            "or --num_aug N (legacy uniform mode)."
+        )
 
     if args.target_per_category is not None:
         # Balanced mode: train only
@@ -625,8 +637,9 @@ def _augment_named_split(input_dir, output_dir, split: str, quotas: dict, seed: 
         if other == split:
             continue
         src = input_dir_p / "annotations" / f"{other}.json"
-        if src.is_file():
-            shutil.copy2(src, output_dir_p / "annotations" / f"{other}.json")
+        dst = output_dir_p / "annotations" / f"{other}.json"
+        if src.is_file() and not dst.exists():
+            shutil.copy2(src, dst)
 
     split_ann = input_dir_p / "annotations" / f"{split}.json"
     with open(split_ann) as f:
@@ -683,14 +696,19 @@ def _augment_named_split(input_dir, output_dir, split: str, quotas: dict, seed: 
             aug_rgb, aug_mask, aug_depth, aug_K, aug_W, aug_H, polygons, bbox, area = out
             aug_filename = f"AUG_{split}_{counter:04d}.png"
             counter += 1
-            cv2.imwrite(
+            ok_rgb = cv2.imwrite(
                 str(output_dir_p / "images" / aug_filename),
                 cv2.cvtColor(aug_rgb, cv2.COLOR_RGB2BGR),
             )
-            cv2.imwrite(
+            ok_depth = cv2.imwrite(
                 str(output_dir_p / "depth" / f"{os.path.splitext(aug_filename)[0]}.exr"),
                 aug_depth,
             )
+            if not (ok_rgb and ok_depth):
+                logger.warning(
+                    f"cv2.imwrite failed for {aug_filename}; skipping this sample."
+                )
+                continue
             write_augmented_meta(
                 output_dir_p / "meta", aug_filename,
                 K=aug_K, W=aug_W, H=aug_H, annotation=meta_annotation,

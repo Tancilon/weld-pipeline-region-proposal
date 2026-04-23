@@ -665,7 +665,7 @@ def test_cli_accepts_target_per_category():
     ])
     assert args.target_per_category == 900
     assert args.seed == 7
-    assert args.num_aug == 3  # default unchanged
+    assert args.num_aug is None  # default is None; mode must be chosen explicitly
 
 
 def test_cli_legacy_num_aug_still_works():
