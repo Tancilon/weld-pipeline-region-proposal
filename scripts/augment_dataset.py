@@ -4,6 +4,8 @@ import json
 import logging
 import os
 import shutil
+from dataclasses import dataclass
+from typing import Optional, Tuple
 
 # EXR support must be enabled before cv2 is imported.
 os.environ.setdefault("OPENCV_IO_ENABLE_OPENEXR", "1")
@@ -49,6 +51,41 @@ def update_K_translate(K: np.ndarray, tx: float, ty: float) -> np.ndarray:
     K2[0, 2] = K[0, 2] + tx
     K2[1, 2] = K[1, 2] + ty
     return K2
+
+
+@dataclass(frozen=True)
+class GeomParams:
+    """Parameters for one geometric-augmentation pass.
+
+    All ops are applied in canonical order: flip -> crop -> resize -> translate.
+    Any op can be disabled by passing the identity (flip=False, crop_box=None,
+    resize_to=None, translate=(0.0, 0.0)).
+    """
+    flip: bool
+    crop_box: Optional[Tuple[int, int, int, int]]  # (x0, y0, w, h) or None
+    resize_to: Optional[Tuple[int, int]]           # (dst_w, dst_h) or None
+    translate: Tuple[float, float]                  # (tx, ty) in pixels
+
+
+def compose_K(
+    K: np.ndarray, width: int, height: int, params: GeomParams,
+) -> Tuple[np.ndarray, int, int]:
+    """Apply params to K in canonical order and return (K', W', H')."""
+    W, H = width, height
+    if params.flip:
+        K = update_K_flip(K, width=W)
+    if params.crop_box is not None:
+        x0, y0, w_crop, h_crop = params.crop_box
+        K = update_K_crop(K, x0=x0, y0=y0)
+        W, H = w_crop, h_crop
+    if params.resize_to is not None:
+        dst_w, dst_h = params.resize_to
+        K = update_K_resize(K, src_w=W, src_h=H, dst_w=dst_w, dst_h=dst_h)
+        W, H = dst_w, dst_h
+    tx, ty = params.translate
+    if tx != 0.0 or ty != 0.0:
+        K = update_K_translate(K, tx=tx, ty=ty)
+    return K, W, H
 
 
 def mask_to_polygons(mask: np.ndarray, min_area: float = 50.0) -> list[list[float]]:

@@ -148,3 +148,55 @@ def test_update_K_translate():
     assert K2[1, 1] == 110.0
     assert K2[0, 2] == pytest.approx(33.0)
     assert K2[1, 2] == pytest.approx(38.0)
+
+
+from scripts.augment_dataset import GeomParams, compose_K
+
+
+def test_compose_K_flip_only():
+    K = _K(100.0, 110.0, 30.0, 40.0)
+    params = GeomParams(flip=True, crop_box=None, resize_to=None, translate=(0.0, 0.0))
+    K2, W2, H2 = compose_K(K, width=100, height=80, params=params)
+    assert W2 == 100 and H2 == 80
+    assert K2[0, 2] == pytest.approx(99 - 30.0)
+
+
+def test_compose_K_crop_then_resize_equivalent_to_stepwise():
+    K = _K(100.0, 100.0, 30.0, 40.0)
+    # Crop (x0=10, y0=5) to 80x70, then resize back to 100x100
+    params = GeomParams(
+        flip=False,
+        crop_box=(10, 5, 80, 70),
+        resize_to=(100, 100),
+        translate=(0.0, 0.0),
+    )
+    K2, W2, H2 = compose_K(K, width=100, height=100, params=params)
+
+    # Manual two-step
+    K_cropped = update_K_crop(K, x0=10, y0=5)
+    K_resized = update_K_resize(K_cropped, src_w=80, src_h=70, dst_w=100, dst_h=100)
+
+    assert W2 == 100 and H2 == 100
+    np.testing.assert_allclose(K2, K_resized)
+
+
+def test_compose_K_all_ops():
+    K = _K(100.0, 100.0, 30.0, 40.0)
+    params = GeomParams(
+        flip=True,
+        crop_box=(5, 5, 90, 90),
+        resize_to=(100, 100),
+        translate=(2.0, -3.0),
+    )
+    K2, W2, H2 = compose_K(K, width=100, height=100, params=params)
+    # Apply in canonical order: flip (cx := 99-30 = 69), crop (cx -= 5 -> 64, cy -= 5 -> 35),
+    # resize 90->100 (sx=sy=10/9), cx' = (64+0.5)*10/9 - 0.5, then translate (+2, -3)
+    expected_cx_after_crop = 64.0
+    expected_cy_after_crop = 35.0
+    sx = 100 / 90
+    expected_cx_after_resize = (expected_cx_after_crop + 0.5) * sx - 0.5
+    expected_cy_after_resize = (expected_cy_after_crop + 0.5) * sx - 0.5
+    expected_cx = expected_cx_after_resize + 2.0
+    expected_cy = expected_cy_after_resize - 3.0
+    assert K2[0, 2] == pytest.approx(expected_cx)
+    assert K2[1, 2] == pytest.approx(expected_cy)
