@@ -135,7 +135,7 @@ to `albumentations` and applied to RGB only.
 | op | probability | parameters | rationale |
 |---|---|---|---|
 | HorizontalFlip | 0.5 | — | mirror about vertical axis; K updates cleanly |
-| RandomResizedCrop | 0.5 | scale ∈ [0.8, 1.0], aspect ratio fixed at W/H | equivalent to crop-then-resize, both pinhole-preserving |
+| RandomResizedCrop | 0.5 | scale ∈ [0.8, 1.0], aspect ratio locked to source W/H (no distortion) | equivalent to crop-then-resize, both pinhole-preserving |
 | Translate | 0.3 | translate_percent ∈ [-0.05, 0.05] independently on x, y | shifts principal point |
 
 ### 5.2 Geometric ops explicitly excluded
@@ -325,8 +325,9 @@ Mask → polygon conversion reuses the existing `mask_to_polygons` helper
 ### 9.3 Safety re-sampling
 
 The existing `is_augmentation_safe` check (polygon area ≥ 10% of source area)
-is retained. We extend it to also check that post-transform depth has
-≥ 10% of the source's valid-pixel count. On failure, re-sample all geometric
+is retained. We extend it to also check that post-transform depth has at
+least 10% as many non-zero pixels (i.e. valid-depth pixels, after §7.3
+sanitization) as the source depth map. On failure, re-sample all geometric
 parameters up to 5 times; if all retries fail, log a warning and move on
 without inflating that quota slot.
 
