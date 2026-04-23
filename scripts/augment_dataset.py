@@ -221,18 +221,9 @@ def is_augmentation_safe(aug_area: float, original_area: float, min_ratio: float
     return (aug_area / original_area) >= min_ratio
 
 
-def build_transform(height: int, width: int) -> A.Compose:
+def build_color_transform() -> A.Compose:
+    """RGB-only color augmentations; no geometric ops (those are hand-rolled)."""
     return A.Compose([
-        A.HorizontalFlip(p=0.5),
-        A.Rotate(limit=15, border_mode=cv2.BORDER_CONSTANT, fill=0, fill_mask=0, p=0.4),
-        A.RandomResizedCrop(
-            size=(height, width), scale=(0.8, 1.0),
-            ratio=(width / height, width / height), p=0.4,
-        ),
-        A.Affine(
-            translate_percent=(-0.05, 0.05), shear=(-5, 5),
-            border_mode=cv2.BORDER_CONSTANT, fill=0, fill_mask=0, p=0.3,
-        ),
         A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=0.5),
         A.HueSaturationValue(hue_shift_limit=10, sat_shift_limit=20, val_shift_limit=20, p=0.4),
         A.GaussNoise(std_range=(0.02, 0.05), p=0.3),
@@ -290,7 +281,7 @@ def augment_split(
     # Determine image dimensions from first image
     first_img = coco_data['images'][0]
     height, width = first_img['height'], first_img['width']
-    transform = build_transform(height=height, width=width)
+    transform = build_color_transform()
 
     aug_images = []
     aug_annotations = []

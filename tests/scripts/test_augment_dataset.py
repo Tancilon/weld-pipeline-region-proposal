@@ -59,20 +59,17 @@ def test_is_augmentation_safe_zero_area():
 
 
 import albumentations as A
-from scripts.augment_dataset import build_transform
+from scripts.augment_dataset import build_color_transform
 
-def test_build_transform_returns_compose():
-    transform = build_transform(height=1080, width=1920)
+def test_build_color_transform_returns_compose():
+    transform = build_color_transform()
     assert isinstance(transform, A.Compose)
 
-def test_build_transform_applies_to_image_and_mask():
-    transform = build_transform(height=100, width=200)
+def test_build_color_transform_applies_to_image():
+    transform = build_color_transform()
     image = np.random.randint(0, 255, (100, 200, 3), dtype=np.uint8)
-    mask = np.zeros((100, 200), dtype=np.uint8)
-    mask[25:75, 50:150] = 1
-    result = transform(image=image, mask=mask)
+    result = transform(image=image)
     assert result['image'].shape == (100, 200, 3)
-    assert result['mask'].shape == (100, 200)
 
 
 from scripts.augment_dataset import augment_single_image
@@ -82,7 +79,7 @@ def test_augment_single_image_produces_valid_output():
     mask = np.zeros((100, 200), dtype=np.uint8)
     mask[25:75, 50:150] = 1
     original_area = float(mask.sum())
-    transform = build_transform(height=100, width=200)
+    transform = build_color_transform()
     result = augment_single_image(image, mask, original_area, transform, max_retries=5, min_area_ratio=0.1)
     assert result is not None
     aug_img, polygons, bbox, area = result
@@ -96,7 +93,7 @@ def test_augment_single_image_returns_none_on_impossible():
     mask = np.zeros((100, 200), dtype=np.uint8)
     mask[0, 0] = 1
     original_area = 5000.0
-    transform = build_transform(height=100, width=200)
+    transform = build_color_transform()
     result = augment_single_image(image, mask, original_area, transform, max_retries=3, min_area_ratio=0.1)
     assert result is None
 
@@ -393,3 +390,14 @@ def test_roundtrip_translate():
     _roundtrip_consistency(GeomParams(
         flip=False, crop_box=None, resize_to=None, translate=(2.0, -1.0),
     ))
+
+
+from scripts.augment_dataset import build_color_transform
+
+
+def test_color_transform_preserves_shape():
+    rgb = (np.random.rand(24, 32, 3) * 255).astype(np.uint8)
+    t = build_color_transform()
+    out = t(image=rgb)["image"]
+    assert out.shape == rgb.shape
+    assert out.dtype == rgb.dtype
