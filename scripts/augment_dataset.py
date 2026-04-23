@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import random
 import shutil
 from dataclasses import dataclass
 from typing import Optional, Tuple
@@ -86,6 +87,35 @@ def compose_K(
     if tx != 0.0 or ty != 0.0:
         K = update_K_translate(K, tx=tx, ty=ty)
     return K, W, H
+
+
+def sample_geom_params(width: int, height: int, rng: random.Random) -> GeomParams:
+    """Sample a GeomParams instance using the probabilities and ranges from spec §5.1."""
+    # HorizontalFlip p=0.5
+    flip = rng.random() < 0.5
+
+    # RandomResizedCrop p=0.5; scale in [0.8, 1.0], aspect ratio locked to source W/H
+    crop_box = None
+    resize_to = None
+    if rng.random() < 0.5:
+        scale = rng.uniform(0.8, 1.0)
+        # Keep aspect ratio: area = scale * W * H, same AR => w_crop = sqrt(scale) * W, h_crop = sqrt(scale) * H
+        w_crop = max(1, int(round(width * (scale ** 0.5))))
+        h_crop = max(1, int(round(height * (scale ** 0.5))))
+        w_crop = min(w_crop, width)
+        h_crop = min(h_crop, height)
+        x0 = rng.randint(0, width - w_crop)
+        y0 = rng.randint(0, height - h_crop)
+        crop_box = (x0, y0, w_crop, h_crop)
+        resize_to = (width, height)  # resize back to source
+
+    # Translate p=0.3; +/-5% on each axis independently
+    tx = ty = 0.0
+    if rng.random() < 0.3:
+        tx = rng.uniform(-0.05, 0.05) * width
+        ty = rng.uniform(-0.05, 0.05) * height
+
+    return GeomParams(flip=flip, crop_box=crop_box, resize_to=resize_to, translate=(tx, ty))
 
 
 def mask_to_polygons(mask: np.ndarray, min_area: float = 50.0) -> list[list[float]]:
@@ -179,7 +209,6 @@ def augment_split(
     num_aug: int,
     seed: int,
 ) -> None:
-    import random
     random.seed(seed)
     np.random.seed(seed)
 

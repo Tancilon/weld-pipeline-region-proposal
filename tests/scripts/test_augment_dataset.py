@@ -200,3 +200,40 @@ def test_compose_K_all_ops():
     expected_cy = expected_cy_after_resize - 3.0
     assert K2[0, 2] == pytest.approx(expected_cx)
     assert K2[1, 2] == pytest.approx(expected_cy)
+
+
+import random
+
+from scripts.augment_dataset import sample_geom_params
+
+
+def test_sample_geom_params_reproducible():
+    rng_a = random.Random(42)
+    rng_b = random.Random(42)
+    p_a = sample_geom_params(width=1920, height=1080, rng=rng_a)
+    p_b = sample_geom_params(width=1920, height=1080, rng=rng_b)
+    assert p_a == p_b
+
+
+def test_sample_geom_params_ranges():
+    rng = random.Random(0)
+    for _ in range(200):
+        p = sample_geom_params(width=1920, height=1080, rng=rng)
+        # translate within +-5%
+        assert -1920 * 0.05 - 1 <= p.translate[0] <= 1920 * 0.05 + 1
+        assert -1080 * 0.05 - 1 <= p.translate[1] <= 1080 * 0.05 + 1
+        if p.crop_box is not None:
+            x0, y0, w, h = p.crop_box
+            # crop must stay inside source
+            assert 0 <= x0 and x0 + w <= 1920
+            assert 0 <= y0 and y0 + h <= 1080
+            # scale in [0.8, 1.0]
+            scale = (w * h) / (1920 * 1080)
+            assert 0.8 - 1e-6 <= scale <= 1.0 + 1e-6
+            # aspect ratio locked to W/H (within floor rounding error of 1 px)
+            source_ar = 1920 / 1080
+            cropped_ar = w / h
+            assert abs(cropped_ar - source_ar) / source_ar < 0.002
+        if p.resize_to is not None:
+            # crop+resize always brings output back to source size
+            assert p.resize_to == (1920, 1080)
