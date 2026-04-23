@@ -74,32 +74,6 @@ def test_build_color_transform_applies_to_image():
     assert result['image'].shape == (100, 200, 3)
 
 
-from scripts.augment_dataset import augment_single_image
-
-def test_augment_single_image_produces_valid_output():
-    image = np.random.randint(0, 255, (100, 200, 3), dtype=np.uint8)
-    mask = np.zeros((100, 200), dtype=np.uint8)
-    mask[25:75, 50:150] = 1
-    original_area = float(mask.sum())
-    transform = build_color_transform()
-    result = augment_single_image(image, mask, original_area, transform, max_retries=5, min_area_ratio=0.1)
-    assert result is not None
-    aug_img, polygons, bbox, area = result
-    assert aug_img.shape == (100, 200, 3)
-    assert len(polygons) >= 1
-    assert len(bbox) == 4
-    assert area > 0
-
-def test_augment_single_image_returns_none_on_impossible():
-    image = np.random.randint(0, 255, (100, 200, 3), dtype=np.uint8)
-    mask = np.zeros((100, 200), dtype=np.uint8)
-    mask[0, 0] = 1
-    original_area = 5000.0
-    transform = build_color_transform()
-    result = augment_single_image(image, mask, original_area, transform, max_retries=3, min_area_ratio=0.1)
-    assert result is None
-
-
 def _K(fx, fy, cx, cy):
     return np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=np.float64)
 
@@ -670,3 +644,28 @@ def test_augment_train_split_end_to_end(tmp_path):
     for a in aug.dataset["annotations"]:
         if a["id"] >= 100000:  # augmented
             assert a["source_image_id"] in orig_ids
+
+
+import argparse
+from scripts.augment_dataset import build_arg_parser
+
+
+def test_cli_accepts_target_per_category():
+    p = build_arg_parser()
+    args = p.parse_args([
+        "--input_dir", "/tmp/in", "--output_dir", "/tmp/out",
+        "--target_per_category", "900", "--seed", "7",
+    ])
+    assert args.target_per_category == 900
+    assert args.seed == 7
+    assert args.num_aug == 3  # default unchanged
+
+
+def test_cli_legacy_num_aug_still_works():
+    p = build_arg_parser()
+    args = p.parse_args([
+        "--input_dir", "/tmp/in", "--output_dir", "/tmp/out",
+        "--num_aug", "2",
+    ])
+    assert args.target_per_category is None
+    assert args.num_aug == 2

@@ -1,5 +1,6 @@
 """Offline data augmentation for AIWS5.2 COCO segmentation dataset."""
 
+import argparse
 import json
 import logging
 import os
@@ -324,154 +325,6 @@ def build_color_transform() -> A.Compose:
     ])
 
 
-def augment_single_image(
-    image: np.ndarray,
-    mask: np.ndarray,
-    original_area: float,
-    transform: A.Compose,
-    max_retries: int = 5,
-    min_area_ratio: float = 0.1,
-) -> tuple[np.ndarray, list[list[float]], list[float], float] | None:
-    for _ in range(max_retries):
-        result = transform(image=image, mask=mask)
-        aug_image = result['image']
-        aug_mask = result['mask']
-        polygons = mask_to_polygons(aug_mask, min_area=50.0)
-        if not polygons:
-            continue
-        bbox, area = compute_bbox_area(polygons)
-        if is_mask_safe(area, original_area, min_ratio=min_area_ratio):
-            return aug_image, polygons, bbox, area
-    return None
-
-
-def augment_split(
-    input_dir: str,
-    output_dir: str,
-    split: str,
-    num_aug: int,
-    seed: int,
-) -> None:
-    random.seed(seed)
-    np.random.seed(seed)
-
-    ann_path = os.path.join(input_dir, 'annotations', f'{split}.json')
-    with open(ann_path) as f:
-        coco_data = json.load(f)
-
-    coco = COCO(ann_path)
-
-    os.makedirs(os.path.join(output_dir, 'annotations'), exist_ok=True)
-    os.makedirs(os.path.join(output_dir, 'images'), exist_ok=True)
-
-    # Copy original images
-    for img_info in coco_data['images']:
-        src = os.path.join(input_dir, 'images', img_info['file_name'])
-        dst = os.path.join(output_dir, 'images', img_info['file_name'])
-        if os.path.exists(src):
-            shutil.copy2(src, dst)
-
-    # Determine image dimensions from first image
-    first_img = coco_data['images'][0]
-    height, width = first_img['height'], first_img['width']
-    transform = build_color_transform()
-
-    aug_images = []
-    aug_annotations = []
-    aug_img_id = 100000
-    aug_ann_id = 100000
-    aug_file_counter = 0
-
-    total = len(coco_data['images'])
-    for idx, img_info in enumerate(coco_data['images']):
-        img_id = img_info['id']
-        img_path = os.path.join(input_dir, 'images', img_info['file_name'])
-        image = cv2.imread(img_path)
-        if image is None:
-            logger.warning(f"Could not read image: {img_path}, skipping.")
-            continue
-        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-
-        # Get annotation for this image (exactly one per image)
-        ann_ids = coco.getAnnIds(imgIds=img_id)
-        if not ann_ids:
-            logger.warning(f"No annotation for image_id={img_id}, skipping.")
-            continue
-        ann = coco.loadAnns(ann_ids)[0]
-        mask = coco.annToMask(ann)
-        original_area = ann['area']
-
-        for aug_idx in range(num_aug):
-            result = augment_single_image(
-                image, mask, original_area, transform,
-                max_retries=5, min_area_ratio=0.1,
-            )
-            if result is None:
-                logger.warning(
-                    f"[{split}] Failed to augment image_id={img_id} "
-                    f"(slot {aug_idx+1}/{num_aug}) after max retries, skipping."
-                )
-                continue
-
-            aug_image, polygons, bbox, area = result
-
-            # Save augmented image
-            aug_filename = f"AUG_{split}_{aug_file_counter:04d}.png"
-            aug_file_counter += 1
-            aug_path = os.path.join(output_dir, 'images', aug_filename)
-            cv2.imwrite(aug_path, cv2.cvtColor(aug_image, cv2.COLOR_RGB2BGR))
-
-            # Create image entry
-            aug_images.append({
-                'license': img_info.get('license', ''),
-                'url': '',
-                'file_name': aug_filename,
-                'height': height,
-                'width': width,
-                'date_captured': '',
-                'id': aug_img_id,
-            })
-
-            # Create annotation entry
-            aug_annotations.append({
-                'iscrowd': False,
-                'image_id': aug_img_id,
-                'image_name': aug_filename,
-                'category_id': ann['category_id'],
-                'id': aug_ann_id,
-                'segmentation': polygons,
-                'area': area,
-                'bbox': bbox,
-                'source_image_id': img_id,
-            })
-
-            aug_img_id += 1
-            aug_ann_id += 1
-
-        if (idx + 1) % 50 == 0 or (idx + 1) == total:
-            logger.info(f"[{split}] Processed {idx+1}/{total} images, "
-                        f"generated {aug_file_counter} augmented images so far.")
-
-    # Merge original + augmented
-    merged = {
-        'info': coco_data.get('info', {}),
-        'licenses': coco_data.get('licenses', []),
-        'categories': coco_data['categories'],
-        'images': coco_data['images'] + aug_images,
-        'annotations': coco_data['annotations'] + aug_annotations,
-    }
-
-    out_ann_path = os.path.join(output_dir, 'annotations', f'{split}.json')
-    with open(out_ann_path, 'w') as f:
-        json.dump(merged, f, ensure_ascii=False, indent=2)
-
-    logger.info(
-        f"[{split}] Done. Original: {len(coco_data['images'])}, "
-        f"Augmented: {len(aug_images)}, "
-        f"Total: {len(merged['images'])} images."
-    )
-
-
 def _sanitize_depth(depth: np.ndarray, max_meters: float = 4.0) -> np.ndarray:
     """Match datasets_nuclear.py:186-191: NaN/Inf/<0/>max_meters -> 0."""
     invalid = ~np.isfinite(depth)
@@ -676,49 +529,171 @@ def augment_train_split(
     )
 
 
-def main():
-    import argparse
+def build_arg_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        description="Offline data augmentation for AIWS5.2 COCO segmentation datasets."
+    )
+    p.add_argument("--input_dir", type=str, required=True,
+                   help="Path to input dataset (must contain annotations/, images/, depth/, meta/).")
+    p.add_argument("--output_dir", type=str, required=True,
+                   help="Path to output augmented dataset (must differ from input_dir).")
+    p.add_argument("--target_per_category", type=int, default=None,
+                   help="If set, balance each non-empty train category to this count "
+                        "(only the train split is augmented).")
+    p.add_argument("--num_aug", type=int, default=3,
+                   help="Legacy uniform multiplier (applied to train+val when "
+                        "--target_per_category is not set).")
+    p.add_argument("--seed", type=int, default=42, help="Random seed.")
+    return p
 
-    parser = argparse.ArgumentParser(
-        description="Offline data augmentation for COCO segmentation datasets."
-    )
-    parser.add_argument(
-        '--input_dir', type=str, required=True,
-        help='Path to input dataset (must contain annotations/ and images/).',
-    )
-    parser.add_argument(
-        '--output_dir', type=str, required=True,
-        help='Path to output augmented dataset.',
-    )
-    parser.add_argument(
-        '--num_aug', type=int, default=3,
-        help='Number of augmented images per original image (default: 3).',
-    )
-    parser.add_argument(
-        '--seed', type=int, default=42,
-        help='Random seed for reproducibility (default: 42).',
-    )
-    args = parser.parse_args()
+
+def main() -> None:
+    args = build_arg_parser().parse_args()
 
     logging.basicConfig(
         level=logging.INFO,
-        format='%(asctime)s [%(levelname)s] %(message)s',
+        format="%(asctime)s [%(levelname)s] %(message)s",
     )
 
-    for split in ['train', 'val']:
-        ann_path = os.path.join(args.input_dir, 'annotations', f'{split}.json')
-        if not os.path.exists(ann_path):
-            logger.warning(f"Annotation file not found: {ann_path}, skipping {split}.")
-            continue
-        augment_split(
-            input_dir=args.input_dir,
-            output_dir=args.output_dir,
-            split=split,
-            num_aug=args.num_aug,
-            seed=args.seed,
+    input_dir = Path(args.input_dir)
+    output_dir = Path(args.output_dir)
+    if input_dir.resolve() == output_dir.resolve():
+        raise SystemExit("ERROR: --input_dir and --output_dir must differ.")
+
+    if args.target_per_category is not None:
+        # Balanced mode: train only
+        train_ann = input_dir / "annotations" / "train.json"
+        if not train_ann.is_file():
+            raise SystemExit(f"ERROR: {train_ann} not found.")
+        coco = COCO(str(train_ann))
+        rng = random.Random(args.seed)
+        quotas = compute_quotas_balanced(coco, target=args.target_per_category, rng=rng)
+        augment_train_split(
+            input_dir=input_dir, output_dir=output_dir,
+            quotas=quotas, seed=args.seed,
         )
+    else:
+        # Legacy uniform mode: train + val
+        for split in ("train", "val"):
+            split_ann = input_dir / "annotations" / f"{split}.json"
+            if not split_ann.is_file():
+                logger.warning(f"{split_ann} not found, skipping {split}")
+                continue
+            coco = COCO(str(split_ann))
+            quotas = compute_quotas_uniform(coco, num_aug=args.num_aug)
+            _augment_named_split(
+                input_dir=input_dir, output_dir=output_dir,
+                split=split, quotas=quotas, seed=args.seed,
+            )
 
     logger.info("Augmentation complete.")
+
+
+def _augment_named_split(input_dir, output_dir, split: str, quotas: dict, seed: int) -> None:
+    """Legacy-mode variant that augments an arbitrary named split.
+
+    Used only by the --num_aug path. Duplicates a trimmed version of
+    augment_train_split's inner loop because it operates on a split other
+    than train.
+    """
+    output_dir_p = Path(output_dir)
+    input_dir_p = Path(input_dir)
+    (output_dir_p / "annotations").mkdir(parents=True, exist_ok=True)
+    copy_dataset_files(input_dir_p, output_dir_p)
+    for other in ("train", "val", "test"):
+        if other == split:
+            continue
+        src = input_dir_p / "annotations" / f"{other}.json"
+        if src.is_file():
+            shutil.copy2(src, output_dir_p / "annotations" / f"{other}.json")
+
+    split_ann = input_dir_p / "annotations" / f"{split}.json"
+    with open(split_ann) as f:
+        coco_data = json.load(f)
+    coco = COCO(str(split_ann))
+    color_transform = build_color_transform()
+    rng = random.Random(seed)
+    np.random.seed(seed)
+
+    aug_images, aug_annotations = [], []
+    aug_img_id = aug_ann_id = 100000
+    counter = 0
+    for img_info in coco_data["images"]:
+        q = quotas.get(img_info["id"], 0)
+        if q == 0:
+            continue
+        fname = img_info["file_name"]
+        stem = os.path.splitext(fname)[0]
+        rgb = cv2.imread(str(input_dir_p / "images" / fname), cv2.IMREAD_COLOR)
+        if rgb is None:
+            continue
+        rgb = cv2.cvtColor(rgb, cv2.COLOR_BGR2RGB)
+        depth = cv2.imread(
+            str(input_dir_p / "depth" / f"{stem}.exr"),
+            cv2.IMREAD_ANYCOLOR | cv2.IMREAD_ANYDEPTH,
+        )
+        if depth is None:
+            continue
+        if depth.ndim == 3:
+            depth = depth[:, :, 0]
+        depth = _sanitize_depth(depth.astype(np.float32, copy=False))
+        ann_ids = coco.getAnnIds(imgIds=img_info["id"])
+        if not ann_ids:
+            continue
+        ann = coco.loadAnns(ann_ids)[0]
+        mask = coco.annToMask(ann).astype(np.uint8)
+        try:
+            K, W, H, meta_annotation = read_source_meta(input_dir_p / "meta", fname)
+        except FileNotFoundError:
+            continue
+        for slot in range(q):
+            out = _try_generate_augmented_sample(
+                rgb, mask, depth, K, W, H, ann["area"],
+                color_transform, rng, max_retries=5,
+            )
+            if out is None:
+                continue
+            aug_rgb, aug_mask, aug_depth, aug_K, aug_W, aug_H, polygons, bbox, area = out
+            aug_filename = f"AUG_{split}_{counter:04d}.png"
+            counter += 1
+            cv2.imwrite(
+                str(output_dir_p / "images" / aug_filename),
+                cv2.cvtColor(aug_rgb, cv2.COLOR_RGB2BGR),
+            )
+            cv2.imwrite(
+                str(output_dir_p / "depth" / f"{os.path.splitext(aug_filename)[0]}.exr"),
+                aug_depth,
+            )
+            write_augmented_meta(
+                output_dir_p / "meta", aug_filename,
+                K=aug_K, W=aug_W, H=aug_H, annotation=meta_annotation,
+            )
+            aug_images.append({
+                "license": img_info.get("license", ""), "url": "",
+                "file_name": aug_filename, "height": int(aug_H), "width": int(aug_W),
+                "date_captured": "", "id": aug_img_id,
+            })
+            aug_annotations.append({
+                "iscrowd": False, "image_id": aug_img_id, "image_name": aug_filename,
+                "category_id": ann["category_id"], "id": aug_ann_id,
+                "segmentation": polygons, "area": area, "bbox": bbox,
+                "source_image_id": img_info["id"],
+            })
+            aug_img_id += 1
+            aug_ann_id += 1
+    merged = {
+        "info": coco_data.get("info", {}),
+        "licenses": coco_data.get("licenses", []),
+        "categories": coco_data["categories"],
+        "images": coco_data["images"] + aug_images,
+        "annotations": coco_data["annotations"] + aug_annotations,
+    }
+    with open(output_dir_p / "annotations" / f"{split}.json", "w") as f:
+        json.dump(merged, f, ensure_ascii=False, indent=2)
+    logger.info(
+        f"[{split}] legacy-mode: {len(coco_data['images'])} originals, "
+        f"{len(aug_images)} augmented."
+    )
 
 
 if __name__ == '__main__':
