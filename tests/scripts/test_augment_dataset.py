@@ -430,3 +430,77 @@ def test_is_depth_safe_rejects_mostly_invalid():
     aug = np.zeros((10, 10), dtype=np.float32)
     aug[0, :5] = 1.5  # 5 valid, 5% of src
     assert is_depth_safe(aug_depth=aug, original_depth=src, min_ratio=0.1) is False
+
+
+from types import SimpleNamespace
+
+from scripts.augment_dataset import compute_quotas_balanced, compute_quotas_uniform
+
+
+def _fake_coco(images_per_category: dict[int, int]):
+    """Build a minimal object exposing the pycocotools interface we use."""
+    images = []
+    anns = []
+    img_id = 0
+    ann_id = 0
+    for cat_id, n in images_per_category.items():
+        for _ in range(n):
+            images.append({"id": img_id})
+            anns.append({"id": ann_id, "image_id": img_id, "category_id": cat_id})
+            img_id += 1
+            ann_id += 1
+    cats = [{"id": cid, "name": f"cat{cid}"} for cid in images_per_category.keys()]
+    fake = SimpleNamespace()
+    fake.imgs = {im["id"]: im for im in images}
+    fake.anns = {a["id"]: a for a in anns}
+    fake.cats = {c["id"]: c for c in cats}
+    fake.getCatIds = lambda: list(fake.cats.keys())
+    fake.getImgIds = lambda catIds=None: [
+        a["image_id"] for a in anns if (catIds is None or a["category_id"] in catIds)
+    ]
+    return fake
+
+
+def test_compute_quotas_balanced_small_remainder():
+    # 1 category with 5 images, target 8 -> need 3
+    coco = _fake_coco({1: 5})
+    rng = random.Random(0)
+    quotas = compute_quotas_balanced(coco, target=8, rng=rng)
+    assert sum(quotas.values()) == 3
+    # Each image quota is 0 or 1 since base=0, remainder=3
+    assert all(q in (0, 1) for q in quotas.values())
+    # Exactly 3 images got the +1
+    assert list(quotas.values()).count(1) == 3
+
+
+def test_compute_quotas_balanced_base_plus_remainder():
+    # 4 images, target 10 -> need 6, base=1, remainder=2
+    coco = _fake_coco({1: 4})
+    rng = random.Random(0)
+    quotas = compute_quotas_balanced(coco, target=10, rng=rng)
+    assert sum(quotas.values()) == 6
+    assert all(q in (1, 2) for q in quotas.values())
+    assert list(quotas.values()).count(2) == 2
+
+
+def test_compute_quotas_balanced_skips_already_met():
+    coco = _fake_coco({1: 12})  # already > target=10
+    rng = random.Random(0)
+    quotas = compute_quotas_balanced(coco, target=10, rng=rng)
+    assert sum(quotas.values()) == 0
+
+
+def test_compute_quotas_balanced_skips_zero_samples():
+    # two cats declared; one has 0 images
+    coco = _fake_coco({1: 3, 2: 0})
+    rng = random.Random(0)
+    quotas = compute_quotas_balanced(coco, target=5, rng=rng)
+    # Only category 1 produces quota entries
+    assert sum(quotas.values()) == 2
+
+
+def test_compute_quotas_uniform():
+    coco = _fake_coco({1: 3, 2: 4})
+    quotas = compute_quotas_uniform(coco, num_aug=5)
+    assert sum(quotas.values()) == 7 * 5
+    assert all(q == 5 for q in quotas.values())

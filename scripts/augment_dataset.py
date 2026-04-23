@@ -230,6 +230,37 @@ def is_depth_safe(aug_depth: np.ndarray, original_depth: np.ndarray, min_ratio: 
     return (aug_valid / src_valid) >= min_ratio
 
 
+def compute_quotas_balanced(coco, target: int, rng: random.Random) -> dict[int, int]:
+    """Per-category balancing: each category's image pool gets base + random remainder.
+
+    Categories with 0 samples or already >= target are skipped (no down-sampling).
+    Returns a dict mapping image_id -> how many augmented copies to make from it.
+    """
+    quotas: dict[int, int] = {}
+    for cat_id in coco.getCatIds():
+        img_ids = list(set(coco.getImgIds(catIds=[cat_id])))
+        count = len(img_ids)
+        if count == 0:
+            logger.warning(f"category {cat_id}: 0 samples, cannot augment, skipping")
+            continue
+        if count >= target:
+            logger.info(f"category {cat_id}: {count} >= target {target}, skipping")
+            continue
+        need = target - count
+        base = need // count
+        remainder = need % count
+        for img_id in img_ids:
+            quotas[img_id] = quotas.get(img_id, 0) + base
+        for img_id in rng.sample(img_ids, remainder):
+            quotas[img_id] = quotas.get(img_id, 0) + 1
+    return quotas
+
+
+def compute_quotas_uniform(coco, num_aug: int) -> dict[int, int]:
+    """Legacy mode: every image gets num_aug augmentations."""
+    return {img_id: num_aug for img_id in coco.getImgIds()}
+
+
 def build_color_transform() -> A.Compose:
     """RGB-only color augmentations; no geometric ops (those are hand-rolled)."""
     return A.Compose([
