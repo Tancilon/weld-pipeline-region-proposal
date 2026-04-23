@@ -40,7 +40,7 @@ def test_mask_to_polygons_empty_mask():
     assert len(polygons) == 0
 
 
-from scripts.augment_dataset import compute_bbox_area, is_augmentation_safe
+from scripts.augment_dataset import compute_bbox_area, is_mask_safe
 
 def test_compute_bbox_area_simple():
     polygon = [10.0, 10.0, 50.0, 10.0, 50.0, 50.0, 10.0, 50.0]
@@ -48,14 +48,14 @@ def test_compute_bbox_area_simple():
     assert bbox == [10.0, 10.0, 40.0, 40.0]
     assert area == 1600.0
 
-def test_is_augmentation_safe_pass():
-    assert is_augmentation_safe(500.0, 1000.0, min_ratio=0.1) is True
+def test_is_mask_safe_pass():
+    assert is_mask_safe(500.0, 1000.0, min_ratio=0.1) is True
 
-def test_is_augmentation_safe_fail():
-    assert is_augmentation_safe(50.0, 1000.0, min_ratio=0.1) is False
+def test_is_mask_safe_fail():
+    assert is_mask_safe(50.0, 1000.0, min_ratio=0.1) is False
 
-def test_is_augmentation_safe_zero_area():
-    assert is_augmentation_safe(0.0, 1000.0, min_ratio=0.1) is False
+def test_is_mask_safe_zero_area():
+    assert is_mask_safe(0.0, 1000.0, min_ratio=0.1) is False
 
 
 import albumentations as A
@@ -401,3 +401,32 @@ def test_color_transform_preserves_shape():
     out = t(image=rgb)["image"]
     assert out.shape == rgb.shape
     assert out.dtype == rgb.dtype
+
+
+from scripts.augment_dataset import is_mask_safe, is_depth_safe
+
+
+def test_is_mask_safe_accepts_large():
+    assert is_mask_safe(aug_area=90.0, original_area=100.0, min_ratio=0.1) is True
+
+
+def test_is_mask_safe_rejects_tiny():
+    assert is_mask_safe(aug_area=5.0, original_area=100.0, min_ratio=0.1) is False
+
+
+def test_is_mask_safe_rejects_zero_original():
+    assert is_mask_safe(aug_area=5.0, original_area=0.0, min_ratio=0.1) is False
+
+
+def test_is_depth_safe_accepts_many_valid():
+    src = np.full((10, 10), 1.5, dtype=np.float32)      # 100 valid
+    aug = np.full((10, 10), 1.5, dtype=np.float32)
+    aug[:, :3] = 0  # 70 valid
+    assert is_depth_safe(aug_depth=aug, original_depth=src, min_ratio=0.1) is True
+
+
+def test_is_depth_safe_rejects_mostly_invalid():
+    src = np.full((10, 10), 1.5, dtype=np.float32)      # 100 valid
+    aug = np.zeros((10, 10), dtype=np.float32)
+    aug[0, :5] = 1.5  # 5 valid, 5% of src
+    assert is_depth_safe(aug_depth=aug, original_depth=src, min_ratio=0.1) is False

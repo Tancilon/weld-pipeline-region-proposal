@@ -215,10 +215,19 @@ def compute_bbox_area(polygons: list[list[float]]) -> tuple[list[float], float]:
     return bbox, total_area
 
 
-def is_augmentation_safe(aug_area: float, original_area: float, min_ratio: float = 0.1) -> bool:
+def is_mask_safe(aug_area: float, original_area: float, min_ratio: float = 0.1) -> bool:
     if original_area <= 0 or aug_area <= 0:
         return False
     return (aug_area / original_area) >= min_ratio
+
+
+def is_depth_safe(aug_depth: np.ndarray, original_depth: np.ndarray, min_ratio: float = 0.1) -> bool:
+    """Require at least min_ratio * source-valid-pixel-count non-zero pixels in aug_depth."""
+    src_valid = int(np.count_nonzero(original_depth))
+    if src_valid == 0:
+        return False
+    aug_valid = int(np.count_nonzero(aug_depth))
+    return (aug_valid / src_valid) >= min_ratio
 
 
 def build_color_transform() -> A.Compose:
@@ -247,7 +256,7 @@ def augment_single_image(
         if not polygons:
             continue
         bbox, area = compute_bbox_area(polygons)
-        if is_augmentation_safe(area, original_area, min_ratio=min_area_ratio):
+        if is_mask_safe(area, original_area, min_ratio=min_area_ratio):
             return aug_image, polygons, bbox, area
     return None
 
