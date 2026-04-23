@@ -296,3 +296,100 @@ def test_apply_geom_translate_fills_zero_borders():
     assert rgb2[:, :3].sum() == 0
     assert mask2[:, :3].sum() == 0
     assert (depth2[:, :3] == 0).all()
+
+
+def _unproject(K, pixel_xy, depth_map):
+    """Unproject pixel (x, y) to 3D camera frame using depth[y, x]. Returns (3,) or None if invalid."""
+    x, y = pixel_xy
+    if not (0 <= int(round(y)) < depth_map.shape[0] and 0 <= int(round(x)) < depth_map.shape[1]):
+        return None
+    z = float(depth_map[int(round(y)), int(round(x))])
+    if z <= 0:
+        return None
+    fx, fy = K[0, 0], K[1, 1]
+    cx, cy = K[0, 2], K[1, 2]
+    X = (x - cx) * z / fx
+    Y = (y - cy) * z / fy
+    return np.array([X, Y, z], dtype=np.float64)
+
+
+def _apply_params_to_pixel(W, H, params, x, y):
+    """Map a source pixel (x, y) to its post-aug location under params."""
+    if params.flip:
+        x = (W - 1) - x
+    if params.crop_box is not None:
+        x0, y0, _, _ = params.crop_box
+        x = x - x0
+        y = y - y0
+        W = params.crop_box[2]
+        H = params.crop_box[3]
+    if params.resize_to is not None:
+        dst_w, dst_h = params.resize_to
+        sx = dst_w / W
+        sy = dst_h / H
+        x = (x + 0.5) * sx - 0.5
+        y = (y + 0.5) * sy - 0.5
+        W, H = dst_w, dst_h
+    tx, ty = params.translate
+    x += tx
+    y += ty
+    return x, y, W, H
+
+
+def _roundtrip_consistency(params, mirror_x: bool = False):
+    # Synthetic scene: a fronto-parallel plane at z=1.5m, 64x48, cx/cy off-center
+    W, H = 64, 48
+    K = np.array([[40.0, 0, 28.0], [0, 40.0, 22.0], [0, 0, 1]], dtype=np.float64)
+    rgb = np.zeros((H, W, 3), dtype=np.uint8)
+    mask = np.zeros((H, W), dtype=np.uint8)
+    mask[10:38, 12:52] = 1  # central rectangle
+    depth = np.full((H, W), 1.5, dtype=np.float32)
+
+    rgb2, mask2, depth2, K2 = apply_geom(rgb, mask, depth, K, params)
+
+    # Sample 10 mask pixels (deterministic via fixed grid)
+    ys, xs = np.where(mask > 0)
+    idxs = np.linspace(0, len(xs) - 1, 10).astype(int)
+    src_pixels = [(int(xs[i]), int(ys[i])) for i in idxs]
+
+    max_err = 0.0
+    compared = 0
+    for (x, y) in src_pixels:
+        P_src = _unproject(K, (x, y), depth)
+        if P_src is None:
+            continue
+        x2, y2, _, _ = _apply_params_to_pixel(W, H, params, x, y)
+        P_aug = _unproject(K2, (x2, y2), depth2)
+        if P_aug is None:
+            continue  # pixel fell outside after translate -- acceptable
+        # Horizontal flip mirrors the X axis: P_aug = (-P_src.X, P_src.Y, P_src.Z)
+        if mirror_x:
+            expected = np.array([-P_src[0], P_src[1], P_src[2]])
+        else:
+            expected = P_src
+        err = np.linalg.norm(P_aug - expected)
+        max_err = max(max_err, err)
+        compared += 1
+
+    assert compared >= 5, "Too few comparable pixels after augmentation"
+    scene_scale = 1.5  # plane depth
+    assert max_err / scene_scale < 0.05, f"max_err={max_err} exceeds 5% of scene scale"
+
+
+def test_roundtrip_flip():
+    _roundtrip_consistency(
+        GeomParams(flip=True, crop_box=None, resize_to=None, translate=(0.0, 0.0)),
+        mirror_x=True,
+    )
+
+
+def test_roundtrip_crop_resize():
+    _roundtrip_consistency(GeomParams(
+        flip=False, crop_box=(4, 3, 56, 42), resize_to=(64, 48), translate=(0.0, 0.0),
+    ))
+
+
+def test_roundtrip_translate():
+    _roundtrip_consistency(GeomParams(
+        flip=False, crop_box=None, resize_to=None, translate=(2.0, -1.0),
+    ))
