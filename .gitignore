@@ -13,3 +13,5 @@ common
 .codex
 .vscode/
 assets/
+assets_bak/
+.claude/
