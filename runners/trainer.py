@@ -284,7 +284,7 @@ def validate_segmentation_pose_init(cfg):
 
 
 def freeze_pose_params(agent):
-    """Freeze all parameters except the segmentation head/tail modules."""
+    """Freeze all parameters except the segmentation head and LoRA adapters."""
     net = agent.net.module if isinstance(agent.net, torch.nn.DataParallel) else agent.net
     missing = []
     if not hasattr(net, 'eomt_head'):
@@ -295,11 +295,11 @@ def freeze_pose_params(agent):
     else:
         if not hasattr(dino_wrapper, 'query_embed'):
             missing.append('dino_wrapper.query_embed')
-        if not hasattr(dino_wrapper, 'seg_blocks'):
-            missing.append('dino_wrapper.seg_blocks')
+        if not hasattr(dino_wrapper, 'lora_adapters'):
+            missing.append('dino_wrapper.lora_adapters')
     if missing:
         raise RuntimeError(
-            "segmentation training requires dual-tail modules: " + ", ".join(missing)
+            "segmentation training requires LoRA segmentation modules: " + ", ".join(missing)
         )
 
     for param in net.parameters():
@@ -315,8 +315,11 @@ def freeze_pose_params(agent):
     dino_wrapper = getattr(net, 'dino_wrapper', None)
     if dino_wrapper is not None:
         _unfreeze(getattr(dino_wrapper, 'query_embed', None))
-        _unfreeze(getattr(dino_wrapper, 'seg_blocks', None))
-        _unfreeze(getattr(dino_wrapper, 'seg_norm', None))
+        lora_adapters = getattr(dino_wrapper, 'lora_adapters', None)
+        if lora_adapters is not None:
+            for adapter in lora_adapters:
+                adapter.lora_A.requires_grad_(True)
+                adapter.lora_B.requires_grad_(True)
 
     trainable = sum(p.numel() for p in net.parameters() if p.requires_grad)
     total = sum(p.numel() for p in net.parameters())

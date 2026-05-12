@@ -63,6 +63,10 @@ def get_config():
                         help='maximum clipped class weight for positive-count classes')
     parser.add_argument('--unfreeze_dino_last_n', type=int, default=0,
                         help='legacy knob from the old single-tail segmentation flow; ignored by the dual-tail segmentation design')
+    parser.add_argument('--dino_lora_rank', type=int, default=4,
+                        help='rank for LoRA adapters in the DINO segmentation tail')
+    parser.add_argument('--dino_lora_alpha', type=float, default=4.0,
+                        help='scaling factor for LoRA adapters in the DINO segmentation tail')
     parser.add_argument('--dataset_type', type=str, default='omni6dpose',
                         help='dataset type: omni6dpose / nuclear')
     parser.add_argument('--nuclear_data_path', type=str, default='',

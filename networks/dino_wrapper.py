@@ -10,9 +10,53 @@ contract: the original DINO path stays frozen, and query/segmentation modules
 remain trainable regardless of the caller's input model state.
 """
 
-import copy
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+
+
+class LoRAAdapter(nn.Module):
+    """Trainable low-rank adapter weights for a frozen Linear layer."""
+
+    def __init__(self, in_features, out_features, rank=4, alpha=4.0):
+        super().__init__()
+        if rank < 1:
+            raise ValueError("LoRA adapter rank must be >= 1")
+        self.in_features = in_features
+        self.out_features = out_features
+        self.rank = int(rank)
+        self.scaling = float(alpha) / float(rank)
+
+        self.lora_A = nn.Parameter(torch.empty(self.rank, self.in_features))
+        self.lora_B = nn.Parameter(torch.zeros(self.out_features, self.rank))
+        nn.init.kaiming_uniform_(self.lora_A, a=5 ** 0.5)
+
+
+class LoRALinear(nn.Module):
+    """Frozen Linear layer with a trainable low-rank residual path."""
+
+    def __init__(self, linear, adapter):
+        super().__init__()
+        self.in_features = linear.in_features
+        self.out_features = linear.out_features
+        self.lora_active = False
+        object.__setattr__(self, "_adapter", adapter)
+
+        self.weight = nn.Parameter(linear.weight.detach().clone(), requires_grad=False)
+        if linear.bias is None:
+            self.bias = None
+        else:
+            self.bias = nn.Parameter(linear.bias.detach().clone(), requires_grad=False)
+
+    def forward(self, x):
+        out = F.linear(x, self.weight, self.bias)
+        if self.lora_active:
+            adapter = self._adapter
+            out = out + F.linear(
+                F.linear(x, adapter.lora_A),
+                adapter.lora_B,
+            ) * adapter.scaling
+        return out
 
 
 class DINOv2WithQueries(nn.Module):
@@ -28,9 +72,18 @@ class DINOv2WithQueries(nn.Module):
         num_query_tokens: Number of learnable query tokens to inject.
         query_inject_layer: Layer index (negative = from end) at which to
             inject queries. Default -4 means the last 4 layers.
+        lora_rank: Rank of the low-rank adapters installed into the tail.
+        lora_alpha: Scaling factor for the LoRA residual path.
     """
 
-    def __init__(self, dino_model, num_query_tokens=50, query_inject_layer=-4):
+    def __init__(
+        self,
+        dino_model,
+        num_query_tokens=50,
+        query_inject_layer=-4,
+        lora_rank=4,
+        lora_alpha=4.0,
+    ):
         super().__init__()
         self.dino = dino_model
         self.num_query_tokens = num_query_tokens
@@ -49,23 +102,48 @@ class DINOv2WithQueries(nn.Module):
         self.query_embed = nn.Embedding(num_query_tokens, self.embed_dim)
         nn.init.trunc_normal_(self.query_embed.weight, std=0.02)
 
-        self.seg_blocks = copy.deepcopy(self.dino.blocks[self.inject_layer:])
-        if hasattr(self.dino, 'norm') and self.dino.norm is not None:
-            self.seg_norm = copy.deepcopy(self.dino.norm)
-        else:
-            self.seg_norm = None
+        self.lora_adapters = nn.ModuleList()
+        self._lora_layers = []
+        self._install_lora_adapters(lora_rank, lora_alpha)
 
         self._freeze_pose_path()
         self._mark_segmentation_path_trainable()
+
+    def _install_lora_adapters(self, rank, alpha):
+        for block in self.dino.blocks[self.inject_layer:]:
+            self._replace_linear_with_lora(block, rank, alpha)
+
+    def _replace_linear_with_lora(self, module, rank, alpha):
+        for name, child in list(module.named_children()):
+            if isinstance(child, LoRALinear):
+                self.lora_adapters.append(child._adapter)
+                self._lora_layers.append(child)
+            elif isinstance(child, nn.Linear):
+                adapter = LoRAAdapter(
+                    child.in_features,
+                    child.out_features,
+                    rank=rank,
+                    alpha=alpha,
+                )
+                lora_layer = LoRALinear(child, adapter)
+                setattr(module, name, lora_layer)
+                self.lora_adapters.append(adapter)
+                self._lora_layers.append(lora_layer)
+            else:
+                self._replace_linear_with_lora(child, rank, alpha)
 
     def _freeze_pose_path(self):
         self.dino.requires_grad_(False)
 
     def _mark_segmentation_path_trainable(self):
         self.query_embed.requires_grad_(True)
-        self.seg_blocks.requires_grad_(True)
-        if self.seg_norm is not None:
-            self.seg_norm.requires_grad_(True)
+        for adapter in self.lora_adapters:
+            adapter.lora_A.requires_grad_(True)
+            adapter.lora_B.requires_grad_(True)
+
+    def _set_lora_active(self, active):
+        for layer in self._lora_layers:
+            layer.lora_active = active
 
     def _run_stem(self, x):
         tokens = self._prepare_tokens(x)
@@ -82,12 +160,16 @@ class DINOv2WithQueries(nn.Module):
         return pose_tokens
 
     def _run_seg_tail(self, tokens):
-        seg_tokens = tokens
-        for blk in self.seg_blocks:
-            seg_tokens = blk(seg_tokens)
-        if self.seg_norm is not None:
-            seg_tokens = self.seg_norm(seg_tokens)
-        return seg_tokens
+        self._set_lora_active(True)
+        try:
+            seg_tokens = tokens
+            for blk in self.dino.blocks[self.inject_layer:]:
+                seg_tokens = blk(seg_tokens)
+            if hasattr(self.dino, 'norm') and self.dino.norm is not None:
+                seg_tokens = self.dino.norm(seg_tokens)
+            return seg_tokens
+        finally:
+            self._set_lora_active(False)
 
     def _prepare_tokens(self, x):
         """Run DINOv2 patch embedding + CLS token + positional embedding.

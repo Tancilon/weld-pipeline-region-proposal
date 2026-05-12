@@ -14,6 +14,14 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 
+class FakeLoRAAdapter(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(4, 4))
+        self.lora_A = nn.Parameter(torch.ones(1, 4))
+        self.lora_B = nn.Parameter(torch.ones(4, 1))
+
+
 class FakeNet(nn.Module):
     def __init__(self):
         super().__init__()
@@ -29,10 +37,7 @@ class FakeNet(nn.Module):
             nn.Linear(4, 4),
         )
         self.dino_wrapper.query_embed = nn.Embedding(3, 4)
-        self.dino_wrapper.seg_blocks = nn.ModuleList(
-            [nn.Linear(4, 4), nn.Linear(4, 4)]
-        )
-        self.dino_wrapper.seg_norm = nn.LayerNorm(4)
+        self.dino_wrapper.lora_adapters = nn.ModuleList([FakeLoRAAdapter()])
 
 
 class FakeAgent:
@@ -257,12 +262,8 @@ def test_freeze_pose_params_only_keeps_segmentation_modules_trainable(trainer_mo
         "eomt_head.weight",
         "eomt_head.bias",
         "dino_wrapper.query_embed.weight",
-        "dino_wrapper.seg_blocks.0.weight",
-        "dino_wrapper.seg_blocks.0.bias",
-        "dino_wrapper.seg_blocks.1.weight",
-        "dino_wrapper.seg_blocks.1.bias",
-        "dino_wrapper.seg_norm.weight",
-        "dino_wrapper.seg_norm.bias",
+        "dino_wrapper.lora_adapters.0.lora_A",
+        "dino_wrapper.lora_adapters.0.lora_B",
     }
     assert not any(param.requires_grad for param in agent.net.dino_wrapper.dino.parameters())
     assert not any(param.requires_grad for param in agent.net.backbone.parameters())
@@ -294,7 +295,7 @@ def test_freeze_pose_params_raises_when_required_segmentation_modules_missing(tr
 
     agent = SimpleNamespace(net=IncompleteSegNet())
 
-    with pytest.raises(RuntimeError, match="eomt_head|dino_wrapper.seg_blocks"):
+    with pytest.raises(RuntimeError, match="eomt_head|dino_wrapper.lora_adapters"):
         trainer_module.freeze_pose_params(agent)
 
 

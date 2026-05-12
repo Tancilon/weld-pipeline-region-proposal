@@ -55,6 +55,8 @@ class GFObjectPose(nn.Module):
                     raw_dino,
                     num_query_tokens=cfg.num_queries,
                     query_inject_layer=cfg.query_inject_layer,
+                    lora_rank=getattr(cfg, 'dino_lora_rank', 4),
+                    lora_alpha=getattr(cfg, 'dino_lora_alpha', 4.0),
                 )
                 self.eomt_head = EoMTHead(
                     embed_dim=self.dino_dim,

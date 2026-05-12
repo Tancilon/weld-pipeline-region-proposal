@@ -6,7 +6,7 @@ REQUIRED_SINGLE_AGENT_EXACT_KEYS = (
 )
 
 REQUIRED_SINGLE_AGENT_PREFIXES = (
-    "dino_wrapper.seg_blocks.",
+    "dino_wrapper.lora_adapters.",
     "dino_wrapper.dino.blocks.",
     "pose_score_net.",
 )
@@ -285,6 +285,8 @@ def build_cfg(args, agent_type="score", enable_segmentation=False):
     cfg.enable_segmentation = enable_segmentation
     cfg.num_queries = 50
     cfg.query_inject_layer = -4
+    cfg.dino_lora_rank = 4
+    cfg.dino_lora_alpha = 4.0
     cfg.num_object_classes = 6
     cfg.unfreeze_dino_last_n = 4
     cfg.seg_loss_weight = 1.0

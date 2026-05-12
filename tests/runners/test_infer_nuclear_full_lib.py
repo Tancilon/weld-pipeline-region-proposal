@@ -218,7 +218,7 @@ def test_validate_single_agent_seg_state_dict_rejects_legacy_checkpoint(runtime_
         "pose_score_net.fusion_tail.weight": torch.zeros(1),
     }
 
-    with pytest.raises(ValueError, match="single-agent|legacy|query_embed|seg_blocks"):
+    with pytest.raises(ValueError, match="single-agent|legacy|query_embed|lora_adapters"):
         runtime_lib.validate_single_agent_seg_state_dict(legacy_state_dict)
 
 
@@ -226,7 +226,7 @@ def test_validate_single_agent_seg_state_dict_accepts_single_agent_checkpoint(ru
     state_dict = {
         "dino_wrapper.query_embed.weight": torch.zeros(1),
         "eomt_head.class_head.weight": torch.zeros(1),
-        "dino_wrapper.seg_blocks.0.weight": torch.zeros(1),
+        "dino_wrapper.lora_adapters.0.lora_A": torch.zeros(1),
         "dino_wrapper.dino.blocks.0.attn.qkv.weight": torch.zeros(1),
         "pose_score_net.fusion_tail.weight": torch.zeros(1),
     }
@@ -240,7 +240,7 @@ def test_load_main_agent_checkpoint_loads_and_wraps_errors(runtime_lib, monkeypa
     state_dict = {
         "dino_wrapper.query_embed.weight": torch.zeros(1),
         "eomt_head.class_head.weight": torch.zeros(1),
-        "dino_wrapper.seg_blocks.0.weight": torch.zeros(1),
+        "dino_wrapper.lora_adapters.0.lora_A": torch.zeros(1),
         "dino_wrapper.dino.blocks.0.attn.qkv.weight": torch.zeros(1),
         "pose_score_net.fusion_tail.weight": torch.zeros(1),
     }
