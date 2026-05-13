@@ -1,0 +1,42 @@
+schema_version: catspec.v0
+category: channel_steel
+units: meter
+
+provenance:
+  source_mesh: ../datasets/obj_share_models/channel_steel/channel_steel.obj
+  source_weld_mesh: ../datasets/obj_share_models/channel_steel/channel_steel_weld.obj
+  size_source: ../datasets/workpiece_info.json
+
+parts:
+  - id: channel_body
+    primitive: channel_steel
+    role: primary_structure
+    frame: canonical_bbox
+    size_priors:
+      bbox_xyz:
+        - [0.173890, 0.060000, 0.300000]
+    symmetry: mirror_profile
+    prompt_tags:
+      - open_profile
+      - channel_section
+      - rounded_inner_web
+
+welds:
+  - id: inner_open_profile
+    parts:
+      - channel_body
+    locus:
+      type: open_line_arc_line_arc_line
+      source: analytic_from_profile
+      frame: canonical_profile
+      params:
+        plane_axis: x
+        plane_values: dense_internal
+        profile_axes: [y, z]
+        path_count: 2
+        sample_points_per_segment: 32
+    weld_meta:
+      weld_type_prior: fillet
+      torch_constraints: default_single_pass
+      is_load_bearing: true
+      confidence: medium

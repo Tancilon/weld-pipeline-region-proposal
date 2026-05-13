@@ -62,6 +62,22 @@ def test_load_catspec_accepts_square_tube_v0(tmp_path):
     assert spec["welds"][0]["locus"]["type"] == "closed_rounded_rect"
 
 
+@pytest.mark.parametrize(
+    ("spec_name", "category", "locus_type"),
+    [
+        ("channel_steel.yaml", "channel_steel", "open_line_arc_line_arc_line"),
+        ("H_beam.yaml", "H_beam", "open_line_arc_line_arc_line"),
+    ],
+)
+def test_load_catspec_accepts_static_open_profile_categories(spec_name, category, locus_type):
+    spec = load_catspec(Path("specs/categories") / spec_name)
+
+    assert spec["schema_version"] == "catspec.v0"
+    assert spec["category"] == category
+    assert spec["welds"][0]["locus"]["type"] == locus_type
+    assert spec["welds"][0]["locus"]["params"]["plane_values"] == "dense_internal"
+
+
 def test_load_catspec_rejects_missing_required_field(tmp_path):
     spec_path = tmp_path / "bad.yaml"
     spec_path.write_text("schema_version: catspec.v0\ncategory: square_tube\n", encoding="utf-8")
@@ -86,6 +102,44 @@ def test_load_catspec_rejects_missing_corner_radius_source(tmp_path):
     )
 
     with pytest.raises(CatSpecError, match=r"welds\[0\]\.locus\.params\.corner_radius_source"):
+        load_catspec(spec_path)
+
+
+def test_load_catspec_rejects_open_profile_missing_plane_values(tmp_path):
+    spec_path = tmp_path / "bad.yaml"
+    spec_path.write_text(
+        """\
+schema_version: catspec.v0
+category: channel_steel
+units: meter
+provenance:
+  source_mesh: mesh.obj
+  source_weld_mesh: weld.obj
+parts:
+  - id: channel_body
+    primitive: channel_steel
+welds:
+  - id: inner_open_profile
+    parts: [channel_body]
+    locus:
+      type: open_line_arc_line_arc_line
+      source: analytic_from_profile
+      frame: canonical_profile
+      params:
+        plane_axis: x
+        profile_axes: [y, z]
+        path_count: 2
+        sample_points_per_segment: 16
+    weld_meta:
+      weld_type_prior: fillet
+      torch_constraints: default_single_pass
+      is_load_bearing: true
+      confidence: medium
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(CatSpecError, match=r"welds\[0\]\.locus\.params\.plane_values"):
         load_catspec(spec_path)
 
 

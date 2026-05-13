@@ -3,15 +3,20 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
+
+os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 
 import numpy as np
 import trimesh
 
 from catspec.locus import (
+    build_open_line_arc_line_arc_line_loci,
     build_closed_rounded_rect_locus,
     closed_path_gap,
+    estimate_open_profile_paths,
     estimate_square_tube_profile,
     sample_locus_3d,
     sample_segments_2d,
@@ -20,10 +25,11 @@ from catspec.locus import (
 )
 from catspec.schema import load_catspec, resolve_asset_path
 from weld.core import back_project, load_weld_mesh
-from weld.strategies.square_tube import SquareTubeStrategy
+from weld.strategies import get_strategy
 
 
 EXPECTED_ROUNDED_RECT_TYPES = ["line", "arc", "line", "arc", "line", "arc", "line", "arc"]
+EXPECTED_OPEN_PROFILE_TYPES = ["line", "arc", "line", "arc", "line"]
 
 
 def _circle_from_three_points(p0: np.ndarray, pm: np.ndarray, p1: np.ndarray) -> tuple[np.ndarray, float]:
@@ -85,7 +91,11 @@ def _sample_reference_path_3d(path: dict[str, Any], points_per_segment: int) -> 
         else:
             raise ValueError(f"unsupported fitted segment type: {segment['type']!r}")
 
-    points_2d = sample_segments_2d(segments_2d, points_per_segment)
+    points_2d = sample_segments_2d(
+        segments_2d,
+        points_per_segment,
+        closed=bool(path.get("closed", False)),
+    )
     return back_project(points_2d, path["plane"])
 
 
@@ -113,6 +123,7 @@ def _write_overlay(
     generated_2d = _project_to_plane(generated_3d, plane)
 
     try:
+        os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
         import matplotlib
 
         matplotlib.use("Agg")
@@ -140,6 +151,59 @@ def _write_overlay(
     ax.set_aspect("equal", adjustable="box")
     ax.set_xlabel("u")
     ax.set_ylabel("v")
+    ax.grid(True, alpha=0.25)
+    ax.legend(loc="best")
+    fig.tight_layout()
+    fig.savefig(output, dpi=150)
+    plt.close(fig)
+
+
+def _write_multi_overlay(
+    path_pairs: list[dict[str, Any]],
+    profile_axes: tuple[str, str],
+    output_path: str | Path,
+) -> None:
+    """Write a unified profile-axis overlay for one or more path pairs."""
+
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    axis_indices = {"x": 0, "y": 1, "z": 2}
+    u_idx = axis_indices[profile_axes[0]]
+    v_idx = axis_indices[profile_axes[1]]
+
+    references_2d = [pair["reference_3d"][:, [u_idx, v_idx]] for pair in path_pairs]
+    generated_2d = [pair["generated_3d"][:, [u_idx, v_idx]] for pair in path_pairs]
+
+    try:
+        os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ModuleNotFoundError:
+        _write_basic_png_overlay(np.vstack(references_2d), np.vstack(generated_2d), output)
+        return
+
+    fig, ax = plt.subplots(figsize=(7, 7))
+    for idx, (reference_2d, generated_2d_path) in enumerate(zip(references_2d, generated_2d)):
+        ax.plot(
+            reference_2d[:, 0],
+            reference_2d[:, 1],
+            color="tab:blue",
+            linewidth=2.0,
+            label="reference weld" if idx == 0 else None,
+        )
+        ax.plot(
+            generated_2d_path[:, 0],
+            generated_2d_path[:, 1],
+            color="tab:orange",
+            linewidth=1.6,
+            linestyle="--",
+            label="CatSpec locus" if idx == 0 else None,
+        )
+    ax.set_aspect("equal", adjustable="box")
+    ax.set_xlabel(profile_axes[0])
+    ax.set_ylabel(profile_axes[1])
     ax.grid(True, alpha=0.25)
     ax.legend(loc="best")
     fig.tight_layout()
@@ -214,6 +278,64 @@ def _generate_square_tube_locus(spec: dict[str, Any], workpiece_path: str | Path
     return build_closed_rounded_rect_locus(profile)
 
 
+def _generate_catspec_loci(spec: dict[str, Any], workpiece_path: str | Path) -> list[dict[str, Any]]:
+    """Generate CatSpec loci from the workpiece mesh only."""
+
+    weld = spec["welds"][0]
+    locus = weld["locus"]
+    params = locus["params"]
+    mesh = trimesh.load(workpiece_path, process=False)
+
+    if locus["type"] == "closed_rounded_rect":
+        return [_generate_square_tube_locus(spec, workpiece_path)]
+    if locus["type"] == "open_line_arc_line_arc_line":
+        profiles = estimate_open_profile_paths(
+            mesh,
+            plane_axis=str(params["plane_axis"]),
+            plane_values=params["plane_values"],
+            profile_axes=tuple(params["profile_axes"]),
+            path_count=int(params["path_count"]),
+        )
+        return build_open_line_arc_line_arc_line_loci(profiles)
+    raise ValueError(f"unsupported locus type: {locus['type']!r}")
+
+
+def _expected_types_for_locus(locus_type: str) -> list[str]:
+    if locus_type == "closed_rounded_rect":
+        return EXPECTED_ROUNDED_RECT_TYPES
+    if locus_type == "open_line_arc_line_arc_line":
+        return EXPECTED_OPEN_PROFILE_TYPES
+    raise ValueError(f"unsupported locus type: {locus_type!r}")
+
+
+def _summarize_path(closed: bool, segment_types: list[str], points: int, plane_value: float | None = None) -> dict[str, Any]:
+    summary: dict[str, Any] = {
+        "closed": closed,
+        "segment_types": segment_types,
+        "points": int(points),
+    }
+    if plane_value is not None:
+        summary["plane_value"] = float(plane_value)
+    return summary
+
+
+def _with_legacy_single_path_fields(summary: dict[str, Any]) -> dict[str, Any]:
+    if len(summary["paths"]) == 1:
+        first = summary["paths"][0]
+        summary.update(
+            {
+                "closed": first["closed"],
+                "segment_types": first["segment_types"],
+                "points": first["points"],
+            }
+        )
+    return summary
+
+
+def _sort_path_infos(path_infos: list[dict[str, Any]], axis_index: int) -> list[dict[str, Any]]:
+    return sorted(path_infos, key=lambda info: float(np.mean(info["points_3d"][:, axis_index])))
+
+
 def _jsonify(value: Any) -> Any:
     if isinstance(value, np.ndarray):
         return value.tolist()
@@ -224,8 +346,8 @@ def _jsonify(value: Any) -> Any:
     raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
 
 
-def validate_square_tube(spec_path: str | Path, output_dir: str | Path) -> dict[str, Any]:
-    """Compare a CatSpec-derived square-tube locus to the weld OBJ reference."""
+def validate_catspec(spec_path: str | Path, output_dir: str | Path) -> dict[str, Any]:
+    """Compare CatSpec-derived weld loci to the weld OBJ reference."""
 
     spec_file = Path(spec_path)
     output = Path(output_dir)
@@ -234,49 +356,115 @@ def validate_square_tube(spec_path: str | Path, output_dir: str | Path) -> dict[
     spec = load_catspec(spec_file)
     workpiece_path = resolve_asset_path(spec["provenance"]["source_mesh"], spec_file)
     weld_path = resolve_asset_path(spec["provenance"]["source_weld_mesh"], spec_file)
-    points_per_segment = int(spec["welds"][0]["locus"]["params"]["sample_points_per_segment"])
+    locus_spec = spec["welds"][0]["locus"]
+    params = locus_spec["params"]
+    points_per_segment = int(params["sample_points_per_segment"])
+    expected_types = _expected_types_for_locus(locus_spec["type"])
 
-    generated_locus = _generate_square_tube_locus(spec, workpiece_path)
-    generated_3d = sample_locus_3d(generated_locus, points_per_segment)
+    generated_loci = _generate_catspec_loci(spec, workpiece_path)
+    generated_infos = []
+    for generated_locus in generated_loci:
+        generated_3d = sample_locus_3d(generated_locus, points_per_segment)
+        generated_infos.append(
+            {
+                "locus": generated_locus,
+                "points_3d": generated_3d,
+                "segment_types": [segment["type"] for segment in generated_locus["segments"]],
+                "closed": bool(generated_locus.get("closed")),
+                "plane_value": float(generated_locus["profile"]["plane_value"]),
+            }
+        )
 
     weld_mesh = load_weld_mesh(str(weld_path))
-    reference_paths = SquareTubeStrategy().process(weld_mesh)
-    reference_path = reference_paths[0]
-    reference_3d = _sample_reference_path_3d(reference_path, points_per_segment)
+    reference_paths = get_strategy(spec["category"]).process(weld_mesh)
+    reference_infos = []
+    for reference_path in reference_paths:
+        reference_3d = _sample_reference_path_3d(reference_path, points_per_segment)
+        reference_infos.append(
+            {
+                "path": reference_path,
+                "points_3d": reference_3d,
+                "segment_types": [segment["type"] for segment in reference_path["fitted"]],
+                "closed": bool(reference_path.get("closed")),
+            }
+        )
 
-    generated_types = [segment["type"] for segment in generated_locus["segments"]]
-    reference_types = [segment["type"] for segment in reference_path["fitted"]]
+    plane_axis_idx = {"x": 0, "y": 1, "z": 2}[params["plane_axis"]]
+    generated_infos = _sort_path_infos(generated_infos, plane_axis_idx)
+    reference_infos = _sort_path_infos(reference_infos, plane_axis_idx)
+
+    path_pairs = [
+        {"generated": generated, "reference": reference, "generated_3d": generated["points_3d"], "reference_3d": reference["points_3d"]}
+        for generated, reference in zip(generated_infos, reference_infos)
+    ]
     topology_match = (
-        bool(generated_locus.get("closed"))
-        and bool(reference_path.get("closed"))
-        and generated_types == EXPECTED_ROUNDED_RECT_TYPES
-        and reference_types == EXPECTED_ROUNDED_RECT_TYPES
+        len(generated_infos) == len(reference_infos)
+        and all(info["segment_types"] == expected_types for info in generated_infos)
+        and all(info["segment_types"] == expected_types for info in reference_infos)
+        and all(generated["closed"] == reference["closed"] for generated, reference in zip(generated_infos, reference_infos))
     )
 
-    report_path = output / "square_tube_catspec_validation.json"
-    overlay_path = output / "square_tube_catspec_overlay.png"
-    _write_overlay(reference_3d, generated_3d, reference_path["plane"], overlay_path)
+    per_path_metrics = []
+    for idx, pair in enumerate(path_pairs):
+        generated = pair["generated"]
+        reference = pair["reference"]
+        gap = closed_path_gap(generated["locus"]) if generated["closed"] else None
+        per_path_metrics.append(
+            {
+                "path_index": idx,
+                "centerline_rmse": symmetric_rmse(generated["points_3d"], reference["points_3d"]),
+                "hausdorff": symmetric_hausdorff(generated["points_3d"], reference["points_3d"]),
+                "closed_path_gap": gap,
+            }
+        )
+
+    report_path = output / f"{spec['category']}_catspec_validation.json"
+    overlay_path = output / f"{spec['category']}_catspec_overlay.png"
+    _write_multi_overlay(path_pairs, tuple(params["profile_axes"]), overlay_path)
+
+    closed_gaps = [metric["closed_path_gap"] for metric in per_path_metrics if metric["closed_path_gap"] is not None]
+    generated_summary = _with_legacy_single_path_fields(
+        {
+            "path_count": len(generated_infos),
+            "paths": [
+                _summarize_path(
+                    info["closed"],
+                    info["segment_types"],
+                    len(info["points_3d"]),
+                    plane_value=info["plane_value"],
+                )
+                for info in generated_infos
+            ],
+        }
+    )
+    reference_summary = _with_legacy_single_path_fields(
+        {
+            "path_count": len(reference_infos),
+            "paths": [
+                _summarize_path(
+                    info["closed"],
+                    info["segment_types"],
+                    len(info["points_3d"]),
+                )
+                for info in reference_infos
+            ],
+        }
+    )
 
     report = {
         "category": spec["category"],
         "schema_version": spec["schema_version"],
+        "spec_path": str(spec_file),
         "workpiece_path": str(workpiece_path),
         "reference_weld_path": str(weld_path),
         "topology_match": topology_match,
-        "generated": {
-            "closed": bool(generated_locus.get("closed")),
-            "segment_types": generated_types,
-            "points": int(len(generated_3d)),
-        },
-        "reference": {
-            "closed": bool(reference_path.get("closed")),
-            "segment_types": reference_types,
-            "points": int(len(reference_3d)),
-        },
+        "generated": generated_summary,
+        "reference": reference_summary,
         "metrics": {
-            "centerline_rmse": symmetric_rmse(generated_3d, reference_3d),
-            "hausdorff": symmetric_hausdorff(generated_3d, reference_3d),
-            "closed_path_gap": closed_path_gap(generated_locus),
+            "centerline_rmse": float(np.mean([metric["centerline_rmse"] for metric in per_path_metrics])),
+            "hausdorff": float(max(metric["hausdorff"] for metric in per_path_metrics)),
+            "closed_path_gap": float(max(closed_gaps)) if closed_gaps else None,
+            "per_path": per_path_metrics,
         },
         "report_path": str(report_path),
         "overlay_path": str(overlay_path),
@@ -284,3 +472,9 @@ def validate_square_tube(spec_path: str | Path, output_dir: str | Path) -> dict[
 
     report_path.write_text(json.dumps(report, indent=2, default=_jsonify) + "\n", encoding="utf-8")
     return report
+
+
+def validate_square_tube(spec_path: str | Path, output_dir: str | Path) -> dict[str, Any]:
+    """Compare a CatSpec-derived square-tube locus to the weld OBJ reference."""
+
+    return validate_catspec(spec_path, output_dir)

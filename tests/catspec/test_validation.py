@@ -4,7 +4,7 @@ from pathlib import Path
 import numpy as np
 import trimesh
 
-from catspec.validation import validate_square_tube
+from catspec.validation import validate_catspec, validate_square_tube
 
 
 def _make_workpiece_mesh(path: Path):
@@ -121,3 +121,43 @@ def test_validate_square_tube_writes_report_and_overlay(tmp_path):
     assert saved["category"] == "square_tube"
     assert "centerline_rmse" in saved["metrics"]
     assert "rmse" not in saved["metrics"]
+
+
+def test_validate_catspec_dispatches_square_tube_with_unified_paths(tmp_path):
+    workpiece = tmp_path / "square_tube.obj"
+    weld = tmp_path / "square_tube_weld.obj"
+    spec = tmp_path / "square_tube.yaml"
+    output_dir = tmp_path / "out"
+    _make_workpiece_mesh(workpiece)
+    _make_weld_mesh(weld)
+    _write_spec(spec, workpiece, weld)
+
+    report = validate_catspec(spec, output_dir)
+
+    assert report["category"] == "square_tube"
+    assert report["topology_match"] is True
+    assert report["generated"]["path_count"] == 1
+    assert report["reference"]["path_count"] == 1
+    assert len(report["metrics"]["per_path"]) == 1
+    assert Path(report["report_path"]).name == "square_tube_catspec_validation.json"
+    assert Path(report["overlay_path"]).name == "square_tube_catspec_overlay.png"
+
+
+def test_validate_catspec_validates_open_profile_real_assets(tmp_path):
+    for spec_name, category in (("channel_steel.yaml", "channel_steel"), ("H_beam.yaml", "H_beam")):
+        output_dir = tmp_path / category
+
+        report = validate_catspec(Path("specs/categories") / spec_name, output_dir)
+
+        assert report["category"] == category
+        assert report["topology_match"] is True
+        assert report["generated"]["path_count"] == 2
+        assert report["reference"]["path_count"] == 2
+        assert all(path["closed"] is False for path in report["generated"]["paths"])
+        assert all(path["segment_types"] == ["line", "arc", "line", "arc", "line"] for path in report["generated"]["paths"])
+        assert len(report["metrics"]["per_path"]) == 2
+        assert "centerline_rmse" in report["metrics"]
+        assert "hausdorff" in report["metrics"]
+        assert "closed_path_gap" in report["metrics"]
+        assert Path(report["report_path"]).exists()
+        assert Path(report["overlay_path"]).exists()

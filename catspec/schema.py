@@ -22,6 +22,27 @@ REQUIRED_PATHS = (
     ("welds",),
 )
 
+SUPPORTED_CATEGORIES = {"square_tube", "channel_steel", "H_beam"}
+OPEN_PROFILE_CATEGORIES = {"channel_steel", "H_beam"}
+
+LOCUS_REQUIRED_PARAMS = {
+    "closed_rounded_rect": (
+        "plane_axis",
+        "plane_side",
+        "profile_axes",
+        "profile_quantile",
+        "corner_radius_source",
+        "sample_points_per_segment",
+    ),
+    "open_line_arc_line_arc_line": (
+        "plane_axis",
+        "plane_values",
+        "profile_axes",
+        "path_count",
+        "sample_points_per_segment",
+    ),
+}
+
 
 def _get_nested(data: dict[str, Any], path: tuple[str, ...]) -> Any:
     cur: Any = data
@@ -42,47 +63,64 @@ def _require_non_empty_list(data: dict[str, Any], key: str) -> list[dict[str, An
     return value
 
 
-def _validate_square_tube_v0(data: dict[str, Any]) -> None:
+def _require_object(value: Any, field_path: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise CatSpecError(f"{field_path} must be an object")
+    return value
+
+
+def _validate_profile_axes(value: Any, field_path: str) -> None:
+    if not isinstance(value, list) or len(value) != 2:
+        raise CatSpecError(f"{field_path} must be a two-item list")
+    if len(set(value)) != 2 or any(axis not in {"x", "y", "z"} for axis in value):
+        raise CatSpecError(f"{field_path} must contain two distinct axes from x, y, z")
+
+
+def _validate_catspec_v0(data: dict[str, Any]) -> None:
     if data["schema_version"] != "catspec.v0":
         raise CatSpecError(f"unsupported schema_version: {data['schema_version']}")
-    if data["category"] != "square_tube":
-        raise CatSpecError("CatSpec v0 loader currently accepts category square_tube only")
+    if data["category"] not in SUPPORTED_CATEGORIES:
+        raise CatSpecError(f"unsupported category: {data['category']}")
 
     parts = _require_non_empty_list(data, "parts")
     welds = _require_non_empty_list(data, "welds")
 
-    part = parts[0]
-    if part.get("id") != "tube_body":
-        raise CatSpecError("square_tube v0 requires parts[0].id == tube_body")
-    if part.get("primitive") != "square_tube":
-        raise CatSpecError("square_tube v0 requires parts[0].primitive == square_tube")
+    for idx, part in enumerate(parts):
+        for key in ("id", "primitive"):
+            if key not in part:
+                raise CatSpecError(f"missing required field: parts[{idx}].{key}")
 
-    weld = welds[0]
-    locus = weld.get("locus")
-    if not isinstance(locus, dict):
-        raise CatSpecError("welds[0].locus must be an object")
-    if locus.get("type") != "closed_rounded_rect":
-        raise CatSpecError("square_tube v0 requires welds[0].locus.type == closed_rounded_rect")
-    params = locus.get("params")
-    if not isinstance(params, dict):
-        raise CatSpecError("welds[0].locus.params must be an object")
-    for key in (
-        "plane_axis",
-        "plane_side",
-        "profile_axes",
-        "profile_quantile",
-        "corner_radius_source",
-        "sample_points_per_segment",
-    ):
-        if key not in params:
-            raise CatSpecError(f"missing required field: welds[0].locus.params.{key}")
+    for idx, weld in enumerate(welds):
+        locus = _require_object(weld.get("locus"), f"welds[{idx}].locus")
+        locus_type = locus.get("type")
+        if locus_type not in LOCUS_REQUIRED_PARAMS:
+            raise CatSpecError(f"unsupported locus type: {locus_type}")
+        if data["category"] == "square_tube" and locus_type != "closed_rounded_rect":
+            raise CatSpecError("square_tube v0 requires welds[0].locus.type == closed_rounded_rect")
+        if data["category"] in OPEN_PROFILE_CATEGORIES and locus_type != "open_line_arc_line_arc_line":
+            raise CatSpecError(f"{data['category']} v0.1 requires open_line_arc_line_arc_line locus")
 
-    weld_meta = weld.get("weld_meta")
-    if not isinstance(weld_meta, dict):
-        raise CatSpecError("welds[0].weld_meta must be an object")
-    for key in ("weld_type_prior", "torch_constraints", "is_load_bearing", "confidence"):
-        if key not in weld_meta:
-            raise CatSpecError(f"missing required field: welds[0].weld_meta.{key}")
+        params = _require_object(locus.get("params"), f"welds[{idx}].locus.params")
+        for key in LOCUS_REQUIRED_PARAMS[locus_type]:
+            if key not in params:
+                raise CatSpecError(f"missing required field: welds[{idx}].locus.params.{key}")
+        _validate_profile_axes(params["profile_axes"], f"welds[{idx}].locus.params.profile_axes")
+        if params["plane_axis"] not in {"x", "y", "z"}:
+            raise CatSpecError(f"welds[{idx}].locus.params.plane_axis must be x, y, or z")
+        if params["plane_axis"] in params["profile_axes"]:
+            raise CatSpecError(f"welds[{idx}].locus.params plane_axis must differ from profile_axes")
+        if int(params["sample_points_per_segment"]) < 2:
+            raise CatSpecError(f"welds[{idx}].locus.params.sample_points_per_segment must be at least 2")
+        if locus_type == "open_line_arc_line_arc_line":
+            if params["plane_values"] != "dense_internal":
+                raise CatSpecError(f"welds[{idx}].locus.params.plane_values must be dense_internal")
+            if int(params["path_count"]) < 1:
+                raise CatSpecError(f"welds[{idx}].locus.params.path_count must be at least 1")
+
+        weld_meta = _require_object(weld.get("weld_meta"), f"welds[{idx}].weld_meta")
+        for key in ("weld_type_prior", "torch_constraints", "is_load_bearing", "confidence"):
+            if key not in weld_meta:
+                raise CatSpecError(f"missing required field: welds[{idx}].weld_meta.{key}")
 
 
 def load_catspec(path: str | Path) -> dict[str, Any]:
@@ -94,7 +132,7 @@ def load_catspec(path: str | Path) -> dict[str, Any]:
         raise CatSpecError("CatSpec root must be a YAML object")
     for required_path in REQUIRED_PATHS:
         _get_nested(data, required_path)
-    _validate_square_tube_v0(data)
+    _validate_catspec_v0(data)
     return data
 
 
