@@ -66,7 +66,14 @@ def _validate_square_tube_v0(data: dict[str, Any]) -> None:
     params = locus.get("params")
     if not isinstance(params, dict):
         raise CatSpecError("welds[0].locus.params must be an object")
-    for key in ("plane_axis", "plane_side", "profile_axes", "profile_quantile", "sample_points_per_segment"):
+    for key in (
+        "plane_axis",
+        "plane_side",
+        "profile_axes",
+        "profile_quantile",
+        "corner_radius_source",
+        "sample_points_per_segment",
+    ):
         if key not in params:
             raise CatSpecError(f"missing required field: welds[0].locus.params.{key}")
 

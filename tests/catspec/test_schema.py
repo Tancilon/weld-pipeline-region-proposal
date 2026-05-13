@@ -78,6 +78,17 @@ def test_load_catspec_rejects_wrong_schema_version(tmp_path):
         load_catspec(spec_path)
 
 
+def test_load_catspec_rejects_missing_corner_radius_source(tmp_path):
+    spec_path = tmp_path / "bad.yaml"
+    spec_path.write_text(
+        VALID_YAML.replace("        corner_radius_source: estimate_from_workpiece_mesh\n", ""),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(CatSpecError, match=r"welds\[0\]\.locus\.params\.corner_radius_source"):
+        load_catspec(spec_path)
+
+
 def test_resolve_asset_path_prefers_existing_absolute_path(tmp_path):
     asset = tmp_path / "mesh.obj"
     asset.write_text("o mesh\n", encoding="utf-8")
