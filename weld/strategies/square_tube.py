@@ -115,10 +115,10 @@ class SquareTubeStrategy(Strategy):
         x = pts_2d[:, 0]
         y = pts_2d[:, 1]
         # Vectorized region classification
-        in_tr = (x > x_max - r) & (y > y_max - r)
-        in_br = (x > x_max - r) & (y < y_min + r)
-        in_bl = (x < x_min + r) & (y < y_min + r)
-        in_tl = (x < x_min + r) & (y > y_max - r)
+        in_tr = (x >= x_max - r) & (y >= y_max - r)
+        in_br = (x >= x_max - r) & (y <= y_min + r)
+        in_bl = (x <= x_min + r) & (y <= y_min + r)
+        in_tl = (x <= x_min + r) & (y >= y_max - r)
         d = np.empty(len(pts_2d))
         d[in_tr] = np.abs(np.linalg.norm(pts_2d[in_tr] - tr_c, axis=1) - r)
         d[in_br] = np.abs(np.linalg.norm(pts_2d[in_br] - br_c, axis=1) - r)
