@@ -161,3 +161,19 @@ def test_validate_catspec_validates_open_profile_real_assets(tmp_path):
         assert "closed_path_gap" in report["metrics"]
         assert Path(report["report_path"]).exists()
         assert Path(report["overlay_path"]).exists()
+
+
+def test_validate_catspec_validates_bellmouth_real_assets(tmp_path):
+    report = validate_catspec(Path("specs/categories/bellmouth.yaml"), tmp_path / "bellmouth")
+
+    assert report["category"] == "bellmouth"
+    assert report["topology_match"] is True
+    assert report["generated"]["path_count"] == 2
+    assert report["reference"]["path_count"] == 2
+    assert all(path["closed"] is False for path in report["generated"]["paths"])
+    assert all(path["segment_types"] == ["line"] for path in report["generated"]["paths"])
+    assert "failure_rate" in report["metrics"]
+    assert "correct_contact_edge_recall" in report["metrics"]
+    assert report["metrics"]["failure_rate"] == 0.0
+    assert report["metrics"]["correct_contact_edge_recall"] == 1.0
+    assert report["metrics"]["centerline_rmse"] < 0.05

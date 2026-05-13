@@ -14,9 +14,11 @@ import trimesh
 
 from catspec.locus import (
     build_open_line_arc_line_arc_line_loci,
+    build_parallel_open_line_loci,
     build_closed_rounded_rect_locus,
     closed_path_gap,
     estimate_open_profile_paths,
+    estimate_parallel_open_line_paths,
     estimate_square_tube_profile,
     sample_locus_3d,
     sample_segments_2d,
@@ -30,6 +32,7 @@ from weld.strategies import get_strategy
 
 EXPECTED_ROUNDED_RECT_TYPES = ["line", "arc", "line", "arc", "line", "arc", "line", "arc"]
 EXPECTED_OPEN_PROFILE_TYPES = ["line", "arc", "line", "arc", "line"]
+EXPECTED_PARALLEL_LINE_TYPES = ["line"]
 
 
 def _circle_from_three_points(p0: np.ndarray, pm: np.ndarray, p1: np.ndarray) -> tuple[np.ndarray, float]:
@@ -297,6 +300,18 @@ def _generate_catspec_loci(spec: dict[str, Any], workpiece_path: str | Path) -> 
             path_count=int(params["path_count"]),
         )
         return build_open_line_arc_line_arc_line_loci(profiles)
+    if locus["type"] == "parallel_open_lines":
+        profiles = estimate_parallel_open_line_paths(
+            mesh,
+            plane_axis=str(params["plane_axis"]),
+            plane_side=params["plane_side"],
+            profile_axes=tuple(params["profile_axes"]),
+            line_axis=str(params["line_axis"]),
+            offset_axis=str(params["offset_axis"]),
+            offset_values=params["offset_values"],
+            path_count=int(params["path_count"]),
+        )
+        return build_parallel_open_line_loci(profiles)
     raise ValueError(f"unsupported locus type: {locus['type']!r}")
 
 
@@ -305,6 +320,8 @@ def _expected_types_for_locus(locus_type: str) -> list[str]:
         return EXPECTED_ROUNDED_RECT_TYPES
     if locus_type == "open_line_arc_line_arc_line":
         return EXPECTED_OPEN_PROFILE_TYPES
+    if locus_type == "parallel_open_lines":
+        return EXPECTED_PARALLEL_LINE_TYPES
     raise ValueError(f"unsupported locus type: {locus_type!r}")
 
 
@@ -389,9 +406,10 @@ def validate_catspec(spec_path: str | Path, output_dir: str | Path) -> dict[str,
             }
         )
 
-    plane_axis_idx = {"x": 0, "y": 1, "z": 2}[params["plane_axis"]]
-    generated_infos = _sort_path_infos(generated_infos, plane_axis_idx)
-    reference_infos = _sort_path_infos(reference_infos, plane_axis_idx)
+    sort_axis = params.get("offset_axis", params["plane_axis"])
+    sort_axis_idx = {"x": 0, "y": 1, "z": 2}[sort_axis]
+    generated_infos = _sort_path_infos(generated_infos, sort_axis_idx)
+    reference_infos = _sort_path_infos(reference_infos, sort_axis_idx)
 
     path_pairs = [
         {"generated": generated, "reference": reference, "generated_3d": generated["points_3d"], "reference_3d": reference["points_3d"]}
@@ -403,6 +421,11 @@ def validate_catspec(spec_path: str | Path, output_dir: str | Path) -> dict[str,
         and all(info["segment_types"] == expected_types for info in reference_infos)
         and all(generated["closed"] == reference["closed"] for generated, reference in zip(generated_infos, reference_infos))
     )
+    matching_edges = sum(
+        generated["segment_types"] == reference["segment_types"] and generated["closed"] == reference["closed"]
+        for generated, reference in zip(generated_infos, reference_infos)
+    )
+    correct_contact_edge_recall = matching_edges / len(reference_infos) if reference_infos else 0.0
 
     per_path_metrics = []
     for idx, pair in enumerate(path_pairs):
@@ -464,6 +487,9 @@ def validate_catspec(spec_path: str | Path, output_dir: str | Path) -> dict[str,
             "centerline_rmse": float(np.mean([metric["centerline_rmse"] for metric in per_path_metrics])),
             "hausdorff": float(max(metric["hausdorff"] for metric in per_path_metrics)),
             "closed_path_gap": float(max(closed_gaps)) if closed_gaps else None,
+            "topology_match": topology_match,
+            "failure_rate": 0.0 if topology_match else 1.0,
+            "correct_contact_edge_recall": float(correct_contact_edge_recall),
             "per_path": per_path_metrics,
         },
         "report_path": str(report_path),

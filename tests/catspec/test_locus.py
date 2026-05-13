@@ -5,9 +5,11 @@ from catspec.locus import (
     OpenProfilePath,
     build_open_line_arc_line_arc_line_loci,
     build_closed_rounded_rect_locus,
+    build_parallel_open_line_loci,
     closed_path_gap,
     estimate_square_tube_profile,
     estimate_open_profile_paths,
+    estimate_parallel_open_line_paths,
     sample_locus_3d,
     symmetric_hausdorff,
     symmetric_rmse,
@@ -158,6 +160,68 @@ def test_build_open_line_arc_line_arc_line_loci_have_expected_topology():
     assert samples.shape[1] == 3
     assert np.allclose(samples[:, 0], -0.05)
     assert np.linalg.norm(samples[0] - samples[-1]) > 0.1
+
+
+def _make_parallel_line_mesh():
+    pts = []
+    y = -0.36
+    for x in (-0.5, -0.28, 0.28, 0.5):
+        for z in (-0.12, 0.08):
+            pts.extend([[x, y, z], [x, y, z]])
+    pts.extend(
+        [
+            [-0.28, y, -0.5],
+            [-0.28, y, 0.5],
+            [0.28, y, -0.5],
+            [0.28, y, 0.5],
+            [-0.5, 0.5, -0.5],
+            [0.5, 0.5, 0.5],
+        ]
+    )
+    return trimesh.Trimesh(vertices=np.array(pts), faces=np.empty((0, 3), dtype=int), process=False)
+
+
+def test_estimate_parallel_open_line_paths_uses_dense_profile_values():
+    mesh = _make_parallel_line_mesh()
+
+    profiles = estimate_parallel_open_line_paths(
+        mesh,
+        plane_axis="y",
+        plane_side="min_dense",
+        profile_axes=("x", "z"),
+        line_axis="x",
+        offset_axis="z",
+        offset_values="dense_internal",
+        path_count=2,
+    )
+
+    assert len(profiles) == 2
+    assert [profile.offset_value for profile in profiles] == [-0.12, 0.08]
+    assert all(profile.start[0] == -0.28 for profile in profiles)
+    assert all(profile.end[0] == 0.28 for profile in profiles)
+
+
+def test_build_parallel_open_line_loci_have_expected_topology():
+    profiles = estimate_parallel_open_line_paths(
+        _make_parallel_line_mesh(),
+        plane_axis="y",
+        plane_side="min_dense",
+        profile_axes=("x", "z"),
+        line_axis="x",
+        offset_axis="z",
+        offset_values="dense_internal",
+        path_count=2,
+    )
+
+    loci = build_parallel_open_line_loci(profiles)
+
+    assert len(loci) == 2
+    assert all(locus["closed"] is False for locus in loci)
+    assert all([segment["type"] for segment in locus["segments"]] == ["line"] for locus in loci)
+    samples = sample_locus_3d(loci[0], points_per_segment=8)
+    assert samples.shape == (8, 3)
+    assert np.allclose(samples[:, 1], -0.36)
+    assert np.linalg.norm(samples[0] - samples[-1]) > 0.5
 
 
 def test_symmetric_metrics_are_zero_for_identical_paths():

@@ -22,8 +22,9 @@ REQUIRED_PATHS = (
     ("welds",),
 )
 
-SUPPORTED_CATEGORIES = {"square_tube", "channel_steel", "H_beam"}
+SUPPORTED_CATEGORIES = {"square_tube", "channel_steel", "H_beam", "bellmouth"}
 OPEN_PROFILE_CATEGORIES = {"channel_steel", "H_beam"}
+PARALLEL_LINE_CATEGORIES = {"bellmouth"}
 
 LOCUS_REQUIRED_PARAMS = {
     "closed_rounded_rect": (
@@ -38,6 +39,16 @@ LOCUS_REQUIRED_PARAMS = {
         "plane_axis",
         "plane_values",
         "profile_axes",
+        "path_count",
+        "sample_points_per_segment",
+    ),
+    "parallel_open_lines": (
+        "plane_axis",
+        "plane_side",
+        "profile_axes",
+        "line_axis",
+        "offset_axis",
+        "offset_values",
         "path_count",
         "sample_points_per_segment",
     ),
@@ -99,6 +110,8 @@ def _validate_catspec_v0(data: dict[str, Any]) -> None:
             raise CatSpecError("square_tube v0 requires welds[0].locus.type == closed_rounded_rect")
         if data["category"] in OPEN_PROFILE_CATEGORIES and locus_type != "open_line_arc_line_arc_line":
             raise CatSpecError(f"{data['category']} v0.1 requires open_line_arc_line_arc_line locus")
+        if data["category"] in PARALLEL_LINE_CATEGORIES and locus_type != "parallel_open_lines":
+            raise CatSpecError(f"{data['category']} v0.2 requires parallel_open_lines locus")
 
         params = _require_object(locus.get("params"), f"welds[{idx}].locus.params")
         for key in LOCUS_REQUIRED_PARAMS[locus_type]:
@@ -114,6 +127,17 @@ def _validate_catspec_v0(data: dict[str, Any]) -> None:
         if locus_type == "open_line_arc_line_arc_line":
             if params["plane_values"] != "dense_internal":
                 raise CatSpecError(f"welds[{idx}].locus.params.plane_values must be dense_internal")
+            if int(params["path_count"]) < 1:
+                raise CatSpecError(f"welds[{idx}].locus.params.path_count must be at least 1")
+        if locus_type == "parallel_open_lines":
+            if params["line_axis"] not in params["profile_axes"]:
+                raise CatSpecError(f"welds[{idx}].locus.params.line_axis must be in profile_axes")
+            if params["offset_axis"] not in params["profile_axes"]:
+                raise CatSpecError(f"welds[{idx}].locus.params.offset_axis must be in profile_axes")
+            if params["line_axis"] == params["offset_axis"]:
+                raise CatSpecError(f"welds[{idx}].locus.params line_axis must differ from offset_axis")
+            if params["offset_values"] != "dense_internal":
+                raise CatSpecError(f"welds[{idx}].locus.params.offset_values must be dense_internal")
             if int(params["path_count"]) < 1:
                 raise CatSpecError(f"welds[{idx}].locus.params.path_count must be at least 1")
 

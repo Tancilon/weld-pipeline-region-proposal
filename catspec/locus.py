@@ -40,6 +40,20 @@ class OpenProfilePath:
     end_neg: tuple[float, float]
 
 
+@dataclass(frozen=True)
+class ParallelOpenLinePath:
+    """One straight open weld line on a dense workpiece profile plane."""
+
+    plane_axis: str
+    plane_value: float
+    profile_axes: tuple[str, str]
+    line_axis: str
+    offset_axis: str
+    offset_value: float
+    start: tuple[float, float]
+    end: tuple[float, float]
+
+
 def _axis_index(axis: str) -> int:
     try:
         return AXIS_TO_INDEX[axis]
@@ -234,6 +248,70 @@ def estimate_open_profile_paths(
     return profiles
 
 
+def _profile_point(
+    line_value: float,
+    offset_value: float,
+    profile_axes: tuple[str, str],
+    line_axis: str,
+    offset_axis: str,
+) -> tuple[float, float]:
+    values = {line_axis: line_value, offset_axis: offset_value}
+    return (float(values[profile_axes[0]]), float(values[profile_axes[1]]))
+
+
+def estimate_parallel_open_line_paths(
+    mesh: Any,
+    plane_axis: str,
+    plane_side: Literal["min_dense", "max_dense"],
+    profile_axes: tuple[str, str],
+    line_axis: str,
+    offset_axis: str,
+    offset_values: Literal["dense_internal"],
+    path_count: int,
+) -> list[ParallelOpenLinePath]:
+    """Estimate parallel straight open weld lines from dense workpiece vertices."""
+
+    if offset_values != "dense_internal":
+        raise ValueError("offset_values must be 'dense_internal'")
+    if path_count < 1:
+        raise ValueError("path_count must be at least 1")
+    if set(profile_axes) != {line_axis, offset_axis}:
+        raise ValueError("profile_axes must contain line_axis and offset_axis")
+
+    vertices = _as_vertices(mesh)
+    plane_idx = _axis_index(plane_axis)
+    profile_indices = tuple(_axis_index(axis) for axis in profile_axes)
+    if len(set((plane_idx, *profile_indices))) != 3:
+        raise ValueError("plane_axis and profile_axes must identify distinct axes")
+
+    plane_value = _dense_plane_value(vertices[:, plane_idx], plane_side)
+    plane_mask = np.isclose(vertices[:, plane_idx], plane_value, atol=1e-6, rtol=0.0)
+    plane_vertices = vertices[plane_mask][:, profile_indices]
+    if len(plane_vertices) == 0:
+        raise ValueError("dense plane selection produced no vertices")
+
+    line_idx = profile_axes.index(line_axis)
+    offset_idx = profile_axes.index(offset_axis)
+    line_values = _dense_internal_plane_values(plane_vertices[:, line_idx], 2)
+    selected_offsets = _dense_internal_plane_values(plane_vertices[:, offset_idx], path_count)
+
+    paths = []
+    for offset_value in selected_offsets:
+        paths.append(
+            ParallelOpenLinePath(
+                plane_axis=plane_axis,
+                plane_value=plane_value,
+                profile_axes=profile_axes,
+                line_axis=line_axis,
+                offset_axis=offset_axis,
+                offset_value=offset_value,
+                start=_profile_point(line_values[0], offset_value, profile_axes, line_axis, offset_axis),
+                end=_profile_point(line_values[-1], offset_value, profile_axes, line_axis, offset_axis),
+            )
+        )
+    return paths
+
+
 def _line(start: tuple[float, float], end: tuple[float, float]) -> dict[str, Any]:
     return {"type": "line", "start": start, "end": end}
 
@@ -340,6 +418,19 @@ def build_open_line_arc_line_arc_line_loci(profiles: list[OpenProfilePath]) -> l
         ]
         loci.append({"closed": False, "profile": asdict(profile), "segments": segments})
     return loci
+
+
+def build_parallel_open_line_loci(profiles: list[ParallelOpenLinePath]) -> list[dict[str, Any]]:
+    """Build open straight-line loci from parallel line profile estimates."""
+
+    return [
+        {
+            "closed": False,
+            "profile": asdict(profile),
+            "segments": [_line(profile.start, profile.end)],
+        }
+        for profile in profiles
+    ]
 
 
 def sample_segments_2d(

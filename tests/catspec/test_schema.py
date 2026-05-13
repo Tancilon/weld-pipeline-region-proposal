@@ -67,6 +67,7 @@ def test_load_catspec_accepts_square_tube_v0(tmp_path):
     [
         ("channel_steel.yaml", "channel_steel", "open_line_arc_line_arc_line"),
         ("H_beam.yaml", "H_beam", "open_line_arc_line_arc_line"),
+        ("bellmouth.yaml", "bellmouth", "parallel_open_lines"),
     ],
 )
 def test_load_catspec_accepts_static_open_profile_categories(spec_name, category, locus_type):
@@ -75,7 +76,7 @@ def test_load_catspec_accepts_static_open_profile_categories(spec_name, category
     assert spec["schema_version"] == "catspec.v0"
     assert spec["category"] == category
     assert spec["welds"][0]["locus"]["type"] == locus_type
-    assert spec["welds"][0]["locus"]["params"]["plane_values"] == "dense_internal"
+    assert spec["welds"][0]["locus"]["params"]["path_count"] >= 1
 
 
 def test_load_catspec_rejects_missing_required_field(tmp_path):
@@ -141,6 +142,16 @@ welds:
 
     with pytest.raises(CatSpecError, match=r"welds\[0\]\.locus\.params\.plane_values"):
         load_catspec(spec_path)
+
+
+def test_cover_plate_schema_gap_is_documented():
+    gap_doc = Path("docs/catspec_v0_2_asset_review.md")
+
+    assert gap_doc.exists()
+    text = gap_doc.read_text(encoding="utf-8")
+    assert "cover_plate" in text
+    assert "schema gap" in text
+    assert "closed freeform" in text
 
 
 def test_resolve_asset_path_prefers_existing_absolute_path(tmp_path):
