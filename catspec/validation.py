@@ -239,10 +239,7 @@ def validate_square_tube(spec_path: str | Path, output_dir: str | Path) -> dict[
     generated_locus = _generate_square_tube_locus(spec, workpiece_path)
     generated_3d = sample_locus_3d(generated_locus, points_per_segment)
 
-    try:
-        weld_mesh = load_weld_mesh(str(weld_path))
-    except ValueError:
-        weld_mesh = trimesh.load_mesh(weld_path, process=False)
+    weld_mesh = load_weld_mesh(str(weld_path))
     reference_paths = SquareTubeStrategy().process(weld_mesh)
     reference_path = reference_paths[0]
     reference_3d = _sample_reference_path_3d(reference_path, points_per_segment)
@@ -277,7 +274,7 @@ def validate_square_tube(spec_path: str | Path, output_dir: str | Path) -> dict[
             "points": int(len(reference_3d)),
         },
         "metrics": {
-            "rmse": symmetric_rmse(generated_3d, reference_3d),
+            "centerline_rmse": symmetric_rmse(generated_3d, reference_3d),
             "hausdorff": symmetric_hausdorff(generated_3d, reference_3d),
             "closed_path_gap": closed_path_gap(generated_locus),
         },

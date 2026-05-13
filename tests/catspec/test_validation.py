@@ -50,8 +50,10 @@ def _make_weld_mesh(path: Path):
         j = (i + 1) % n
         faces.append([2 * i, 2 * j, 2 * i + 1])
         faces.append([2 * j, 2 * j + 1, 2 * i + 1])
-    mesh = trimesh.Trimesh(vertices=np.asarray(verts), faces=np.asarray(faces), process=False)
-    mesh.export(path)
+    lines = ["o weld"]
+    lines.extend(f"v {x:.8f} {y:.8f} {z:.8f}" for x, y, z in verts)
+    lines.extend(f"f {a + 1} {b + 1} {c + 1}" for a, b, c in faces)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def _write_spec(path: Path, workpiece: Path, weld: Path):
@@ -110,8 +112,12 @@ def test_validate_square_tube_writes_report_and_overlay(tmp_path):
     assert report["category"] == "square_tube"
     assert report["topology_match"] is True
     assert report["generated"]["segment_types"] == ["line", "arc", "line", "arc", "line", "arc", "line", "arc"]
+    assert "centerline_rmse" in report["metrics"]
+    assert "rmse" not in report["metrics"]
     assert report["metrics"]["closed_path_gap"] < 1e-9
     assert Path(report["report_path"]).exists()
     assert Path(report["overlay_path"]).exists()
     saved = json.loads(Path(report["report_path"]).read_text(encoding="utf-8"))
     assert saved["category"] == "square_tube"
+    assert "centerline_rmse" in saved["metrics"]
+    assert "rmse" not in saved["metrics"]
