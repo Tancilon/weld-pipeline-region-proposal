@@ -111,3 +111,21 @@ def test_resolve_asset_path_handles_repo_parent_paths(tmp_path, monkeypatch):
     resolved = resolve_asset_path("../datasets/obj_share_models/mesh.obj", spec_path=spec_dir / "spec.yaml")
 
     assert resolved == asset.resolve()
+
+
+def test_resolve_asset_path_uses_absolute_spec_path_when_cwd_is_elsewhere(tmp_path, monkeypatch):
+    repo_root = tmp_path / "repo"
+    sibling = tmp_path / "datasets" / "obj_share_models"
+    sibling.mkdir(parents=True)
+    asset = sibling / "mesh.obj"
+    asset.write_text("o mesh\n", encoding="utf-8")
+    spec_dir = repo_root / "specs" / "categories"
+    spec_dir.mkdir(parents=True)
+    spec_path = spec_dir / "spec.yaml"
+    outside = tmp_path / "unrelated" / "outside" / "nested"
+    outside.mkdir(parents=True)
+    monkeypatch.chdir(outside)
+
+    resolved = resolve_asset_path("../datasets/obj_share_models/mesh.obj", spec_path=spec_path.resolve())
+
+    assert resolved == asset.resolve()

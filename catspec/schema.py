@@ -104,14 +104,19 @@ def resolve_asset_path(raw_path: str | Path, spec_path: str | Path) -> Path:
     if raw.is_absolute():
         return raw
 
-    spec_path = Path(spec_path)
-    search_roots = (
-        Path.cwd(),
-        spec_path.parent,
-        Path.cwd().parent,
-    )
+    spec_path = Path(spec_path).resolve()
+    spec_dir = spec_path.parent
+    search_roots = [spec_dir]
+    for ancestor in spec_dir.parents:
+        search_roots.append(ancestor)
+        search_roots.append(ancestor.parent)
+
+    seen: set[Path] = set()
     for root in search_roots:
+        if root in seen:
+            continue
+        seen.add(root)
         candidate = (root / raw).resolve()
         if candidate.exists():
             return candidate
-    return (Path.cwd() / raw).resolve()
+    return (spec_dir / raw).resolve()
