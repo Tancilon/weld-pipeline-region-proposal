@@ -147,6 +147,60 @@ def test_build_mask_candidates_resizes_masks_to_depth_shape_for_metrics(tmp_path
     assert candidate["depth_valid_ratio"] == 1.0
 
 
+def test_build_mask_candidates_maps_crop_masks_to_original_shape(tmp_path):
+    masks_dir = tmp_path / "semantic_sam/0034_masks"
+    mask_path = _write_mask(
+        masks_dir / "0034_mask_000.png",
+        np.array([[1, 0], [0, 1]], dtype=bool),
+    )
+    metadata_path = tmp_path / "semantic_sam/0034_metadata.json"
+    metadata_path.parent.mkdir(parents=True, exist_ok=True)
+    metadata_path.write_text(
+        json.dumps(
+            {
+                "model_type": "T",
+                "levels": [4, 5, 6],
+                "overlay_path": str(tmp_path / "semantic_sam/0034_overlay.png"),
+                "masks": [
+                    {
+                        "mask_index": 0,
+                        "mask_path": str(mask_path),
+                        "area": 2,
+                        "bbox": [0, 0, 2, 2],
+                        "predicted_iou": 0.9,
+                        "stability_score": 0.8,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    object_mask = np.zeros((6, 8), dtype=bool)
+    object_mask[1:5, 2:6] = True
+
+    output_path = build_mask_candidates(
+        metadata_path=metadata_path,
+        output_path=tmp_path / "mask_candidates.json",
+        sample_id="0034",
+        workpiece_type="square_tube",
+        depth=np.ones((6, 8), dtype=np.float32),
+        object_mask=object_mask,
+        output_root=tmp_path,
+        crop_bbox_xywh=[2, 1, 4, 4],
+    )
+
+    candidate = json.loads(output_path.read_text(encoding="utf-8"))["candidates"][0]
+    assert candidate["coordinate_space"] == "original_image"
+    assert candidate["mask_coordinate_space"] == "semantic_sam_crop"
+    assert candidate["crop_bbox_xywh"] == [2, 1, 4, 4]
+    assert candidate["source_shape_hw"] == [2, 2]
+    assert candidate["metrics_shape_hw"] == [6, 8]
+    assert candidate["area_px"] == 8
+    assert candidate["bbox_xywh"] == [2, 1, 4, 4]
+    assert candidate["roi_bbox_xywh"] == [0, 0, 4, 4]
+    assert candidate["object_overlap_ratio"] == 1.0
+
+
 def test_write_selected_parts_template_uses_weld_focus(tmp_path):
     output_path = write_selected_parts_template(
         output_path=tmp_path / "selected_parts.template.json",
