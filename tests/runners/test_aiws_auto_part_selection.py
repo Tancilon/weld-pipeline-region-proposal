@@ -79,6 +79,12 @@ def _object_mask() -> np.ndarray:
     return mask
 
 
+def _f101_object_mask() -> np.ndarray:
+    mask = np.zeros((1080, 1920), dtype=np.bool_)
+    mask[44 : 44 + 685, 909 : 909 + 566] = True
+    return mask
+
+
 def test_auto_selector_accepts_clear_tube_candidate(tmp_path):
     output_root = tmp_path
     object_mask = _object_mask()
@@ -199,3 +205,140 @@ def test_auto_selector_stops_when_best_score_has_small_margin(tmp_path):
     assert diagnostics["focused_parts"]["tube"]["decision"] == "rejected"
     assert diagnostics["focused_parts"]["tube"]["reason"] == "score_margin_below_threshold"
     assert not (output_root / "selected_parts.auto.json").exists()
+
+
+def test_auto_selector_keeps_low_depth_ratio_candidate_eligible(tmp_path):
+    output_root = tmp_path
+    object_mask = _f101_object_mask()
+    depth = np.ones(object_mask.shape, dtype=np.float32) * 0.5
+    tube_mask = _write_mask(
+        output_root / "semantic_sam/f101_masks/f101_mask_001.png",
+        slice(46, 46 + 528),
+        slice(995, 995 + 326),
+        shape=object_mask.shape,
+    )
+    candidates_path = _write_candidates(
+        output_root,
+        [
+            {
+                "mask_id": "f101_mask_001",
+                "mask_path": str(tube_mask),
+                "area_px": 142287,
+                "bbox_xywh": [995, 46, 326, 528],
+                "predicted_iou": 0.993780791759491,
+                "stability_score": 0.9915425181388855,
+                "depth_valid_pixels": 16584,
+                "depth_valid_ratio": 0.11655316367623184,
+                "object_overlap_ratio": 0.99972590609121,
+            }
+        ],
+        workpiece_type="square_tube",
+    )
+
+    result = select_weld_focus_masks(
+        candidates_path=candidates_path,
+        output_root=output_root,
+        weld_focus=["tube"],
+        object_mask=object_mask,
+        depth=depth,
+    )
+
+    assert result.accepted is True
+    selected = json.loads(result.selected_parts_path.read_text(encoding="utf-8"))
+    assert selected["focused_parts"] == {"tube": "f101_mask_001"}
+    diagnostics = json.loads(
+        (output_root / "auto_part_selection.json").read_text(encoding="utf-8")
+    )
+    candidate = diagnostics["focused_parts"]["tube"]["candidates"][0]
+    assert candidate["hard_rejection_reasons"] == []
+    assert "depth_valid_ratio_soft_penalty" in candidate["soft_penalty_reasons"]
+    assert "depth_valid_ratio_below_min" not in candidate["rejection_reasons"]
+
+
+def test_square_tube_tube_prefers_vertical_upper_mask_over_plate_like_mask(tmp_path):
+    output_root = tmp_path
+    object_mask = _f101_object_mask()
+    depth = np.ones(object_mask.shape, dtype=np.float32) * 0.5
+    plate_like = _write_mask(
+        output_root / "semantic_sam/f101_masks/f101_mask_000.png",
+        slice(361, 361 + 366),
+        slice(912, 912 + 561),
+        shape=object_mask.shape,
+    )
+    tube_like = _write_mask(
+        output_root / "semantic_sam/f101_masks/f101_mask_001.png",
+        slice(46, 46 + 528),
+        slice(995, 995 + 326),
+        shape=object_mask.shape,
+    )
+    whole_like = _write_mask(
+        output_root / "semantic_sam/f101_masks/f101_mask_002.png",
+        slice(46, 46 + 680),
+        slice(912, 912 + 561),
+        shape=object_mask.shape,
+    )
+    candidates_path = _write_candidates(
+        output_root,
+        [
+            {
+                "mask_id": "f101_mask_000",
+                "mask_path": str(plate_like),
+                "area_px": 93914,
+                "bbox_xywh": [912, 361, 561, 366],
+                "predicted_iou": 0.9944691061973572,
+                "stability_score": 0.9866863489151001,
+                "depth_valid_pixels": 27643,
+                "depth_valid_ratio": 0.2943437613135422,
+                "object_overlap_ratio": 0.9993824136976382,
+            },
+            {
+                "mask_id": "f101_mask_001",
+                "mask_path": str(tube_like),
+                "area_px": 142287,
+                "bbox_xywh": [995, 46, 326, 528],
+                "predicted_iou": 0.993780791759491,
+                "stability_score": 0.9915425181388855,
+                "depth_valid_pixels": 16584,
+                "depth_valid_ratio": 0.11655316367623184,
+                "object_overlap_ratio": 0.99972590609121,
+            },
+            {
+                "mask_id": "f101_mask_002",
+                "mask_path": str(whole_like),
+                "area_px": 235896,
+                "bbox_xywh": [912, 46, 561, 680],
+                "predicted_iou": 0.9778555035591125,
+                "stability_score": 0.9933527708053589,
+                "depth_valid_pixels": 44011,
+                "depth_valid_ratio": 0.18656950520568386,
+                "object_overlap_ratio": 0.9995506494387357,
+            },
+        ],
+        workpiece_type="square_tube",
+    )
+
+    result = select_weld_focus_masks(
+        candidates_path=candidates_path,
+        output_root=output_root,
+        weld_focus=["tube"],
+        object_mask=object_mask,
+        depth=depth,
+    )
+
+    assert result.accepted is True
+    selected = json.loads(result.selected_parts_path.read_text(encoding="utf-8"))
+    assert selected["focused_parts"] == {"tube": "f101_mask_001"}
+    diagnostics = json.loads(
+        (output_root / "auto_part_selection.json").read_text(encoding="utf-8")
+    )
+    tube_payload = diagnostics["focused_parts"]["tube"]
+    assert tube_payload["selected_mask_id"] == "f101_mask_001"
+    assert tube_payload["eligible_best_mask_id"] == "f101_mask_001"
+    ranked = {item["mask_id"]: item for item in tube_payload["candidates"]}
+    assert ranked["f101_mask_001"]["score"] > ranked["f101_mask_000"]["score"]
+    assert (
+        ranked["f101_mask_001"]["category_score_components"]["verticality"]
+        > ranked["f101_mask_000"]["category_score_components"]["verticality"]
+    )
+    assert ranked["f101_mask_000"]["category_score_components"]["plate_like_penalty"] > 0.30
+    assert "area_ratio_above_max" in ranked["f101_mask_002"]["hard_rejection_reasons"]

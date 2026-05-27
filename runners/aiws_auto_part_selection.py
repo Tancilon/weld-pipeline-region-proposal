@@ -54,6 +54,17 @@ def _safe_ratio(numerator: float, denominator: float) -> float:
     return float(numerator) / float(denominator)
 
 
+def _bbox_xywh(mask: np.ndarray) -> list[int]:
+    ys, xs = np.where(mask)
+    if len(xs) == 0:
+        return [0, 0, 0, 0]
+    x0 = int(xs.min())
+    y0 = int(ys.min())
+    x1 = int(xs.max())
+    y1 = int(ys.max())
+    return [x0, y0, int(x1 - x0 + 1), int(y1 - y0 + 1)]
+
+
 def _part_area_ideal(workpiece_type: str, part_name: str) -> float:
     table = {
         ("cover_plate", "tube"): 0.70,
@@ -81,11 +92,52 @@ def _score_aspect(bbox_xywh: list[int], ideal: float) -> float:
     return _clamp01(1.0 - abs(aspect - ideal) / max(ideal, 1.0))
 
 
+def _square_tube_tube_scores(
+    bbox_xywh: list[int],
+    object_bbox_xywh: list[int],
+) -> dict[str, float]:
+    _x, y, width, height = [float(value) for value in bbox_xywh]
+    _obj_x, obj_y, _obj_w, obj_h = [float(value) for value in object_bbox_xywh]
+    width = max(width, 1.0)
+    height = max(height, 1.0)
+    obj_h = max(obj_h, 1.0)
+    vertical_ratio = height / width
+    horizontal_ratio = width / height
+    top_offset = max(y - obj_y, 0.0) / obj_h
+    center_y_norm = ((y + height * 0.5) - obj_y) / obj_h
+    verticality = _clamp01((vertical_ratio - 0.70) / 1.00)
+    top_anchor = _clamp01(1.0 - top_offset / 0.55)
+    center_y = _clamp01(1.0 - max(center_y_norm - 0.55, 0.0) / 0.45)
+    horizontalness = _clamp01((horizontal_ratio - 1.0) / 0.75)
+    lowerness = _clamp01((center_y_norm - 0.50) / 0.30)
+    plate_like_penalty = _clamp01(horizontalness * lowerness)
+    return {
+        "vertical_ratio": float(vertical_ratio),
+        "center_y_norm": float(center_y_norm),
+        "verticality": float(verticality),
+        "top_anchor": float(top_anchor),
+        "center_y": float(center_y),
+        "plate_like_penalty": float(plate_like_penalty),
+    }
+
+
+def _category_score_components(
+    workpiece_type: str,
+    part_name: str,
+    bbox_xywh: list[int],
+    object_bbox_xywh: list[int],
+) -> dict[str, float]:
+    if workpiece_type == "square_tube" and part_name == "tube":
+        return _square_tube_tube_scores(bbox_xywh, object_bbox_xywh)
+    return {}
+
+
 def _evaluate_candidate(
     candidate: dict[str, Any],
     *,
     output_root: Path,
     object_area: int,
+    object_bbox_xywh: list[int],
     target_shape: tuple[int, int],
     workpiece_type: str,
     part_name: str,
@@ -93,21 +145,22 @@ def _evaluate_candidate(
     max_area_ratio_of_object: float,
     min_object_overlap_ratio: float,
     min_depth_valid_ratio: float,
+    soft_depth_valid_ratio: float,
     min_depth_valid_pixels: int,
 ) -> dict[str, Any]:
     mask_id = str(candidate.get("mask_id", ""))
     mask_path_value = str(candidate.get("mask_path", ""))
     mask_path = _resolve_path(mask_path_value, output_root)
-    rejection_reasons: list[str] = []
+    hard_rejection_reasons: list[str] = []
+    soft_penalty_reasons: list[str] = []
     if not mask_path.exists():
-        rejection_reasons.append("mask_path_missing")
+        hard_rejection_reasons.append("mask_path_missing")
     mask_area = 0
     if mask_path.exists():
         mask = _load_bool_mask(mask_path, target_shape)
         mask_area = int(mask.sum())
-    area_px = int(candidate.get("area_px", mask_area))
-    if area_px <= 0:
-        area_px = mask_area
+    metadata_area_px = int(candidate.get("area_px", 0))
+    area_px = mask_area if mask_path.exists() else metadata_area_px
     area_ratio = _safe_ratio(area_px, object_area)
     bbox_xywh = [int(value) for value in candidate.get("bbox_xywh", [0, 0, 0, 0])[:4]]
     object_overlap = candidate.get("object_overlap_ratio", 0.0)
@@ -116,20 +169,28 @@ def _evaluate_candidate(
     depth_valid_ratio = float(candidate.get("depth_valid_ratio", 0.0))
 
     if object_overlap < min_object_overlap_ratio:
-        rejection_reasons.append("object_overlap_below_min")
+        hard_rejection_reasons.append("object_overlap_below_min")
     if area_ratio < min_area_ratio_of_object:
-        rejection_reasons.append("area_ratio_below_min")
+        hard_rejection_reasons.append("area_ratio_below_min")
     if area_ratio > max_area_ratio_of_object:
-        rejection_reasons.append("area_ratio_above_max")
+        hard_rejection_reasons.append("area_ratio_above_max")
     if depth_valid_pixels < min_depth_valid_pixels:
-        rejection_reasons.append("depth_valid_pixels_below_min")
+        hard_rejection_reasons.append("depth_valid_pixels_below_min")
     if depth_valid_ratio < min_depth_valid_ratio:
-        rejection_reasons.append("depth_valid_ratio_below_min")
+        hard_rejection_reasons.append("depth_valid_ratio_below_min")
+    elif depth_valid_ratio < soft_depth_valid_ratio:
+        soft_penalty_reasons.append("depth_valid_ratio_soft_penalty")
     if len(bbox_xywh) != 4 or bbox_xywh[2] <= 0 or bbox_xywh[3] <= 0:
-        rejection_reasons.append("bbox_empty")
+        hard_rejection_reasons.append("bbox_empty")
 
     area_score = _score_area(area_ratio, _part_area_ideal(workpiece_type, part_name))
     shape_score = _score_aspect(bbox_xywh, _part_aspect_ideal(part_name))
+    category_components = _category_score_components(
+        workpiece_type,
+        part_name,
+        bbox_xywh,
+        object_bbox_xywh,
+    )
     score_components = {
         "object_overlap": _clamp01(
             (object_overlap - min_object_overlap_ratio)
@@ -141,25 +202,39 @@ def _evaluate_candidate(
         "predicted_iou": _clamp01(float(candidate.get("predicted_iou", 0.0))),
         "stability_score": _clamp01(float(candidate.get("stability_score", 0.0))),
     }
-    score = (
+    common_score = (
         score_components["object_overlap"] * 0.25
-        + score_components["depth_valid_ratio"] * 0.25
+        + score_components["depth_valid_ratio"] * 0.20
         + score_components["area"] * 0.25
         + score_components["bbox_shape"] * 0.15
-        + score_components["predicted_iou"] * 0.05
-        + score_components["stability_score"] * 0.05
+        + score_components["predicted_iou"] * 0.075
+        + score_components["stability_score"] * 0.075
     )
+    if category_components:
+        score = (
+            common_score * 0.65
+            + category_components.get("verticality", 0.0) * 0.15
+            + category_components.get("top_anchor", 0.0) * 0.12
+            + category_components.get("center_y", 0.0) * 0.08
+            - category_components.get("plate_like_penalty", 0.0) * 0.20
+        )
+    else:
+        score = common_score
+    score = _clamp01(score)
     return {
         "mask_id": mask_id,
         "mask_path": str(mask_path),
         "score": float(score),
         "score_components": score_components,
+        "category_score_components": category_components,
         "area_ratio_of_object": float(area_ratio),
         "bbox_xywh": bbox_xywh,
         "depth_valid_pixels": depth_valid_pixels,
         "depth_valid_ratio": depth_valid_ratio,
         "object_overlap_ratio": float(object_overlap),
-        "rejection_reasons": rejection_reasons,
+        "hard_rejection_reasons": hard_rejection_reasons,
+        "soft_penalty_reasons": soft_penalty_reasons,
+        "rejection_reasons": hard_rejection_reasons + soft_penalty_reasons,
     }
 
 
@@ -185,7 +260,8 @@ def select_weld_focus_masks(
     min_area_ratio_of_object: float = 0.03,
     max_area_ratio_of_object: float = 0.90,
     min_object_overlap_ratio: float = 0.95,
-    min_depth_valid_ratio: float = 0.15,
+    min_depth_valid_ratio: float = 0.05,
+    soft_depth_valid_ratio: float = 0.20,
     min_depth_valid_pixels: int = 100,
 ) -> AutoPartSelectionResult:
     output_root = Path(output_root).resolve()
@@ -204,6 +280,7 @@ def select_weld_focus_masks(
     sample_id = str(payload.get("sample_id", ""))
     workpiece_type = str(payload.get("workpiece_type", ""))
     object_area = int(object_mask_arr.sum())
+    object_bbox_xywh = _bbox_xywh(object_mask_arr)
     diagnostics_parts: dict[str, Any] = {}
     selected_parts: dict[str, str] = {}
     accepted_all = True
@@ -215,6 +292,7 @@ def select_weld_focus_masks(
                 candidate,
                 output_root=output_root,
                 object_area=object_area,
+                object_bbox_xywh=object_bbox_xywh,
                 target_shape=object_mask_arr.shape,
                 workpiece_type=workpiece_type,
                 part_name=part_name,
@@ -222,12 +300,14 @@ def select_weld_focus_masks(
                 max_area_ratio_of_object=max_area_ratio_of_object,
                 min_object_overlap_ratio=min_object_overlap_ratio,
                 min_depth_valid_ratio=min_depth_valid_ratio,
+                soft_depth_valid_ratio=soft_depth_valid_ratio,
                 min_depth_valid_pixels=min_depth_valid_pixels,
             )
             for candidate in payload.get("candidates", [])
         ]
         evaluated.sort(key=lambda item: (-float(item["score"]), str(item["mask_id"])))
-        eligible = [item for item in evaluated if not item["rejection_reasons"]]
+        raw_best = evaluated[0] if evaluated else None
+        eligible = [item for item in evaluated if not item["hard_rejection_reasons"]]
         best = eligible[0] if eligible else None
         second = eligible[1] if len(eligible) > 1 else None
         if best is None:
@@ -261,6 +341,8 @@ def select_weld_focus_masks(
             "decision": "accepted" if accepted else "rejected",
             "reason": reason,
             "selected_mask_id": str(best["mask_id"]) if accepted and best is not None else "",
+            "raw_best_mask_id": str(raw_best["mask_id"]) if raw_best is not None else "",
+            "eligible_best_mask_id": str(best["mask_id"]) if best is not None else "",
             "score": float(best["score"]) if best is not None else 0.0,
             "score_margin": (
                 float(best["score"]) - float(second["score"])
