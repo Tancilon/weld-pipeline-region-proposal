@@ -16,3 +16,5 @@ assets/
 assets_bak/
 .claude/
 *.pth
+Grounded-Segment-Anything/
+Semantic-SAM/
