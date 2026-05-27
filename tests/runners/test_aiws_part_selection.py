@@ -100,6 +100,32 @@ def test_resolve_selected_part_masks_accepts_candidate_id(tmp_path):
     assert result == {"tube": mask_path.resolve()}
 
 
+def test_resolve_selected_part_mask_records_returns_candidate_metadata(tmp_path):
+    from runners.aiws_part_selection import resolve_selected_part_mask_records
+
+    mask_path = tmp_path / "semantic_sam/0034_masks/0034_mask_012.png"
+    mask_path.parent.mkdir(parents=True)
+    mask_path.write_bytes(b"mask")
+    candidates_path = _write_candidates(tmp_path / "mask_candidates.json", mask_path)
+    selected_path = tmp_path / "selected_parts.json"
+    selected_path.write_text(
+        json.dumps({"focused_parts": {"tube": "0034_mask_012"}}),
+        encoding="utf-8",
+    )
+
+    result = resolve_selected_part_mask_records(
+        candidates_path=candidates_path,
+        selected_parts_path=selected_path,
+        cli_overrides={},
+        weld_focus=["tube"],
+        output_root=tmp_path,
+    )
+
+    assert result["tube"].mask_path == mask_path.resolve()
+    assert result["tube"].candidate["mask_id"] == "0034_mask_012"
+    assert result["tube"].part_name == "tube"
+
+
 def test_resolve_selected_part_masks_raises_when_focus_missing(tmp_path):
     candidates_path = tmp_path / "mask_candidates.json"
     candidates_path.write_text(
