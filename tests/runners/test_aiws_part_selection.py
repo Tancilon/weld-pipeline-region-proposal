@@ -100,6 +100,60 @@ def test_resolve_selected_part_masks_accepts_candidate_id(tmp_path):
     assert result == {"tube": mask_path.resolve()}
 
 
+def test_resolve_selected_part_masks_uses_auto_when_manual_missing(tmp_path):
+    mask_path = tmp_path / "semantic_sam/0034_masks/0034_mask_012.png"
+    mask_path.parent.mkdir(parents=True)
+    mask_path.write_bytes(b"mask")
+    candidates_path = _write_candidates(tmp_path / "mask_candidates.json", mask_path)
+    auto_path = tmp_path / "selected_parts.auto.json"
+    auto_path.write_text(
+        json.dumps({"focused_parts": {"tube": "0034_mask_012"}}),
+        encoding="utf-8",
+    )
+
+    result = resolve_selected_part_masks(
+        candidates_path=candidates_path,
+        selected_parts_path=tmp_path / "selected_parts.json",
+        auto_selected_parts_path=auto_path,
+        cli_overrides={},
+        weld_focus=["tube"],
+        output_root=tmp_path,
+    )
+
+    assert result == {"tube": mask_path.resolve()}
+
+
+def test_resolve_selected_part_masks_prefers_manual_over_auto(tmp_path):
+    auto_mask = tmp_path / "semantic_sam/0034_masks/0034_mask_012.png"
+    manual_mask = tmp_path / "manual/tube.png"
+    auto_mask.parent.mkdir(parents=True)
+    manual_mask.parent.mkdir(parents=True)
+    auto_mask.write_bytes(b"mask")
+    manual_mask.write_bytes(b"mask")
+    candidates_path = _write_candidates(tmp_path / "mask_candidates.json", auto_mask)
+    auto_path = tmp_path / "selected_parts.auto.json"
+    auto_path.write_text(
+        json.dumps({"focused_parts": {"tube": "0034_mask_012"}}),
+        encoding="utf-8",
+    )
+    selected_path = tmp_path / "selected_parts.json"
+    selected_path.write_text(
+        json.dumps({"focused_parts": {"tube": str(manual_mask)}}),
+        encoding="utf-8",
+    )
+
+    result = resolve_selected_part_masks(
+        candidates_path=candidates_path,
+        selected_parts_path=selected_path,
+        auto_selected_parts_path=auto_path,
+        cli_overrides={},
+        weld_focus=["tube"],
+        output_root=tmp_path,
+    )
+
+    assert result == {"tube": manual_mask.resolve()}
+
+
 def test_resolve_selected_part_mask_records_returns_candidate_metadata(tmp_path):
     from runners.aiws_part_selection import resolve_selected_part_mask_records
 

@@ -64,12 +64,16 @@ def resolve_selected_part_mask_records(
     cli_overrides: dict[str, str],
     weld_focus: list[str],
     output_root: str | Path,
+    auto_selected_parts_path: str | Path | None = None,
 ) -> dict[str, SelectedPartMask]:
     output_root = Path(output_root).resolve()
     candidates_path = Path(candidates_path)
     candidates_payload = json.loads(candidates_path.read_text(encoding="utf-8"))
     candidates_by_key = _candidate_records(candidates_payload)
-    selected = _load_selected_parts(Path(selected_parts_path))
+    selected: dict[str, str] = {}
+    if auto_selected_parts_path is not None:
+        selected.update(_load_selected_parts(Path(auto_selected_parts_path)))
+    selected.update(_load_selected_parts(Path(selected_parts_path)))
     selected.update(cli_overrides)
 
     result: dict[str, SelectedPartMask] = {}
@@ -104,6 +108,7 @@ def resolve_selected_part_masks(
     cli_overrides: dict[str, str],
     weld_focus: list[str],
     output_root: str | Path,
+    auto_selected_parts_path: str | Path | None = None,
 ) -> dict[str, Path]:
     records = resolve_selected_part_mask_records(
         candidates_path=candidates_path,
@@ -111,5 +116,6 @@ def resolve_selected_part_masks(
         cli_overrides=cli_overrides,
         weld_focus=weld_focus,
         output_root=output_root,
+        auto_selected_parts_path=auto_selected_parts_path,
     )
     return {part: record.mask_path for part, record in records.items()}
