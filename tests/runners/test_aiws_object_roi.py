@@ -36,11 +36,14 @@ def test_normalize_eomt_class_name_rejects_unknown_class():
         normalize_eomt_class_name("未知")
 
 
-def test_build_object_roi_from_mask_writes_mask_crop_and_metadata(tmp_path):
+def test_build_object_roi_from_mask_writes_masked_full_rgb_and_metadata(tmp_path):
     rgb_path = tmp_path / "rgb.png"
     depth_path = tmp_path / "out" / "0034_depth.png"
     mask_path = tmp_path / "external_mask.png"
-    Image.fromarray(np.zeros((12, 14, 3), dtype=np.uint8)).save(rgb_path)
+    rgb = np.zeros((12, 14, 3), dtype=np.uint8)
+    rgb[:, :] = [10, 20, 30]
+    rgb[3:10, 4:12] = [80, 90, 100]
+    Image.fromarray(rgb).save(rgb_path)
     depth_path.parent.mkdir(parents=True, exist_ok=True)
     Image.fromarray(np.ones((12, 14), dtype=np.uint16) * 500).save(depth_path)
     mask = np.zeros((12, 14), dtype=np.uint8)
@@ -55,20 +58,27 @@ def test_build_object_roi_from_mask_writes_mask_crop_and_metadata(tmp_path):
         workpiece_type="square_tube",
         class_id=-1,
         class_confidence=1.0,
-        crop_padding_px=2,
         source_depth_path=depth_path,
     )
 
     assert result.workpiece_type == "square_tube"
     assert result.bbox_xywh == [4, 3, 8, 7]
-    assert result.crop_bbox_xywh == [2, 1, 12, 11]
     assert result.object_mask.shape == (12, 14)
-    assert Image.open(result.crop_rgb_path).size == (12, 11)
+    assert result.object_mask_path.exists()
+    assert result.masked_full_rgb_path.exists()
+    masked_rgb = np.asarray(Image.open(result.masked_full_rgb_path).convert("RGB"))
+    assert masked_rgb.shape == rgb.shape
+    assert (masked_rgb[0, 0] == [255, 255, 255]).all()
+    assert (masked_rgb[4, 5] == [80, 90, 100]).all()
     payload = json.loads(result.roi_metadata_path.read_text(encoding="utf-8"))
     assert payload["workpiece_type"] == "square_tube"
     assert payload["source_shape_hw"] == [12, 14]
     assert payload["source_depth_path"] == "0034_depth.png"
-    assert payload["crop_bbox_xywh"] == [2, 1, 12, 11]
+    assert payload["semantic_sam_input_mode"] == "masked_full"
+    assert payload["masked_full_rgb_path"] == "object_roi/rgb_masked_full.png"
+    assert payload["background_fill_rgb"] == [255, 255, 255]
+    assert "crop_rgb_path" not in payload
+    assert "crop_bbox_xywh" not in payload
 
 
 def test_build_object_roi_from_mask_rejects_empty_mask(tmp_path):
@@ -86,7 +96,6 @@ def test_build_object_roi_from_mask_rejects_empty_mask(tmp_path):
             workpiece_type="square_tube",
             class_id=-1,
             class_confidence=1.0,
-            crop_padding_px=1,
         )
 
 
@@ -137,7 +146,6 @@ def test_object_roi_estimator_uses_top_eomt_prediction(monkeypatch, tmp_path):
         output_dir=tmp_path / "out",
         sample_id="0034",
         score_threshold=0.5,
-        crop_padding_px=0,
     )
 
     assert result.workpiece_type == "square_tube"
@@ -145,4 +153,4 @@ def test_object_roi_estimator_uses_top_eomt_prediction(monkeypatch, tmp_path):
     assert result.class_confidence > 0.9
     assert result.object_mask.shape == (12, 14)
     assert result.object_mask_path.exists()
-    assert result.crop_rgb_path.exists()
+    assert result.masked_full_rgb_path.exists()

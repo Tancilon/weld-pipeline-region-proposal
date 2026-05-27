@@ -29,8 +29,7 @@ class ObjectRoiResult:
     class_confidence: float
     object_mask: np.ndarray
     bbox_xywh: list[int]
-    crop_bbox_xywh: list[int]
-    crop_rgb_path: Path
+    masked_full_rgb_path: Path
     object_mask_path: Path
     roi_metadata_path: Path
 
@@ -53,25 +52,17 @@ def _bbox_xywh(mask: np.ndarray) -> list[int]:
     return [x0, y0, int(x1 - x0 + 1), int(y1 - y0 + 1)]
 
 
-def _padded_crop_bbox(bbox_xywh: list[int], shape_hw: tuple[int, int], padding: int) -> list[int]:
-    height, width = shape_hw
-    x, y, w, h = [int(value) for value in bbox_xywh]
-    x0 = max(0, x - int(padding))
-    y0 = max(0, y - int(padding))
-    x1 = min(width, x + w + int(padding))
-    y1 = min(height, y + h + int(padding))
-    crop_w = int(x1 - x0)
-    crop_h = int(y1 - y0)
-    if crop_w < 10 or crop_h < 10:
-        raise ObjectRoiError(f"object ROI too small: {[x0, y0, crop_w, crop_h]}")
-    return [x0, y0, crop_w, crop_h]
-
-
 def _relative(path: Path, root: Path) -> str:
     try:
         return str(path.resolve().relative_to(root.resolve()))
     except ValueError:
         return str(path)
+
+
+def _masked_full_rgb(rgb: Image.Image, object_mask: np.ndarray) -> Image.Image:
+    rgb_array = np.asarray(rgb.convert("RGB")).copy()
+    rgb_array[~object_mask.astype(np.bool_)] = [255, 255, 255]
+    return Image.fromarray(rgb_array, mode="RGB")
 
 
 def _write_roi_artifacts(
@@ -82,7 +73,6 @@ def _write_roi_artifacts(
     workpiece_type: str,
     class_id: int,
     class_confidence: float,
-    crop_padding_px: int,
     source_depth_path: Path | None = None,
 ) -> ObjectRoiResult:
     rgb = Image.open(rgb_path).convert("RGB")
@@ -92,18 +82,16 @@ def _write_roi_artifacts(
             f"object mask shape mismatch: {object_mask.shape} vs {(height, width)}"
         )
     bbox = _bbox_xywh(object_mask)
-    crop_bbox = _padded_crop_bbox(bbox, (height, width), crop_padding_px)
-    x, y, w, h = crop_bbox
 
     output_dir.mkdir(parents=True, exist_ok=True)
     roi_dir = output_dir / "object_roi"
     roi_dir.mkdir(parents=True, exist_ok=True)
     object_mask_path = output_dir / "object_mask.png"
-    crop_rgb_path = roi_dir / "rgb_crop.png"
+    masked_full_rgb_path = roi_dir / "rgb_masked_full.png"
     roi_metadata_path = roi_dir / "object_roi.json"
 
     Image.fromarray(object_mask.astype(np.uint8) * 255, mode="L").save(object_mask_path)
-    rgb.crop((x, y, x + w, y + h)).save(crop_rgb_path)
+    _masked_full_rgb(rgb, object_mask).save(masked_full_rgb_path)
 
     payload = {
         "schema_version": 1,
@@ -117,9 +105,9 @@ def _write_roi_artifacts(
         "class_confidence": float(class_confidence),
         "object_mask_path": _relative(object_mask_path, output_dir),
         "bbox_xywh": bbox,
-        "crop_bbox_xywh": crop_bbox,
-        "crop_padding_px": int(crop_padding_px),
-        "crop_rgb_path": _relative(crop_rgb_path, output_dir),
+        "semantic_sam_input_mode": "masked_full",
+        "masked_full_rgb_path": _relative(masked_full_rgb_path, output_dir),
+        "background_fill_rgb": [255, 255, 255],
         "source_shape_hw": [int(height), int(width)],
     }
     roi_metadata_path.write_text(
@@ -132,8 +120,7 @@ def _write_roi_artifacts(
         class_confidence=float(class_confidence),
         object_mask=object_mask.astype(np.bool_),
         bbox_xywh=bbox,
-        crop_bbox_xywh=crop_bbox,
-        crop_rgb_path=crop_rgb_path,
+        masked_full_rgb_path=masked_full_rgb_path,
         object_mask_path=object_mask_path,
         roi_metadata_path=roi_metadata_path,
     )
@@ -147,7 +134,6 @@ def build_object_roi_from_mask(
     workpiece_type: str,
     class_id: int,
     class_confidence: float,
-    crop_padding_px: int,
     source_depth_path: str | Path | None = None,
 ) -> ObjectRoiResult:
     mask = np.asarray(Image.open(mask_path).convert("L")) > 0
@@ -159,7 +145,6 @@ def build_object_roi_from_mask(
         workpiece_type=workpiece_type,
         class_id=class_id,
         class_confidence=class_confidence,
-        crop_padding_px=crop_padding_px,
         source_depth_path=Path(source_depth_path) if source_depth_path else None,
     )
 
@@ -259,7 +244,6 @@ class ObjectRoiEstimator:
         output_dir: str | Path,
         sample_id: str,
         score_threshold: float,
-        crop_padding_px: int,
         source_depth_path: str | Path | None = None,
     ) -> ObjectRoiResult:
         runtime = self._load_runtime_bundle()
@@ -288,6 +272,5 @@ class ObjectRoiEstimator:
             workpiece_type=workpiece_type,
             class_id=cls_id,
             class_confidence=score,
-            crop_padding_px=crop_padding_px,
             source_depth_path=Path(source_depth_path) if source_depth_path else None,
         )
