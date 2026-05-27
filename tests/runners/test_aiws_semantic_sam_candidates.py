@@ -99,6 +99,54 @@ def test_build_mask_candidates_computes_depth_metrics_and_sorts(tmp_path):
     assert first["mask_path"] == "semantic_sam/0034_masks/0034_mask_001.png"
 
 
+def test_build_mask_candidates_resizes_masks_to_depth_shape_for_metrics(tmp_path):
+    masks_dir = tmp_path / "semantic_sam/0034_masks"
+    mask_path = _write_mask(
+        masks_dir / "0034_mask_000.png",
+        np.array([[1, 0, 0], [0, 0, 1]], dtype=bool),
+    )
+    metadata_path = tmp_path / "semantic_sam/0034_metadata.json"
+    metadata_path.parent.mkdir(parents=True, exist_ok=True)
+    metadata_path.write_text(
+        json.dumps(
+            {
+                "model_type": "T",
+                "levels": [4, 5, 6],
+                "overlay_path": str(tmp_path / "semantic_sam/0034_overlay.png"),
+                "masks": [
+                    {
+                        "mask_index": 0,
+                        "mask_path": str(mask_path),
+                        "area": 2,
+                        "bbox": [0, 0, 3, 2],
+                        "predicted_iou": 0.99,
+                        "stability_score": 0.98,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    output_path = build_mask_candidates(
+        metadata_path=metadata_path,
+        output_path=tmp_path / "mask_candidates.json",
+        sample_id="0034",
+        workpiece_type="square_tube",
+        depth=np.ones((4, 6), dtype=np.float32),
+        object_mask=None,
+        output_root=tmp_path,
+    )
+
+    candidate = json.loads(output_path.read_text(encoding="utf-8"))["candidates"][0]
+    assert candidate["source_shape_hw"] == [2, 3]
+    assert candidate["metrics_shape_hw"] == [4, 6]
+    assert candidate["area_px"] == 8
+    assert candidate["bbox_xywh"] == [0, 0, 6, 4]
+    assert candidate["depth_valid_pixels"] == 8
+    assert candidate["depth_valid_ratio"] == 1.0
+
+
 def test_write_selected_parts_template_uses_weld_focus(tmp_path):
     output_path = write_selected_parts_template(
         output_path=tmp_path / "selected_parts.template.json",

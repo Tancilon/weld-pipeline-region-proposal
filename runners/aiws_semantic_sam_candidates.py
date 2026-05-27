@@ -17,6 +17,29 @@ def _as_bool_mask(mask_path: str | Path) -> np.ndarray:
     return mask > 0
 
 
+def _resize_bool_mask(mask: np.ndarray, target_shape: tuple[int, int]) -> np.ndarray:
+    if mask.shape == target_shape:
+        return mask
+    height, width = target_shape
+    nearest = getattr(getattr(Image, "Resampling", Image), "NEAREST")
+    resized = Image.fromarray(mask.astype(np.uint8) * 255, mode="L").resize(
+        (width, height),
+        resample=nearest,
+    )
+    return np.asarray(resized) > 0
+
+
+def _bbox_xywh(mask: np.ndarray) -> list[int]:
+    ys, xs = np.where(mask)
+    if len(xs) == 0:
+        return [0, 0, 0, 0]
+    x0 = int(xs.min())
+    y0 = int(ys.min())
+    x1 = int(xs.max())
+    y1 = int(ys.max())
+    return [x0, y0, int(x1 - x0 + 1), int(y1 - y0 + 1)]
+
+
 def _relative_path(path_value: str | Path, output_root: Path) -> str:
     path = Path(path_value)
     if not path.is_absolute():
@@ -47,13 +70,11 @@ def _candidate_from_record(
 ) -> dict[str, Any]:
     mask_path = Path(record["mask_path"])
     mask = _as_bool_mask(mask_path)
-    if mask.shape != depth.shape:
-        raise MaskCandidateError(
-            f"mask/depth shape mismatch for {mask_path}: {mask.shape} vs {depth.shape}"
-        )
+    source_shape = [int(value) for value in mask.shape]
+    mask = _resize_bool_mask(mask, tuple(int(value) for value in depth.shape))
     valid_depth = np.isfinite(depth) & (depth > 0)
     depth_valid_pixels = int((mask & valid_depth).sum())
-    area_px = int(record.get("area", int(mask.sum())))
+    area_px = int(mask.sum())
     if object_mask is None:
         object_overlap_ratio = None
     else:
@@ -67,12 +88,14 @@ def _candidate_from_record(
         "mask_id": _mask_id(mask_path),
         "mask_path": _relative_path(mask_path, output_root),
         "area_px": area_px,
-        "bbox_xywh": [int(value) for value in record.get("bbox", [])],
+        "bbox_xywh": _bbox_xywh(mask),
         "predicted_iou": float(record.get("predicted_iou", 0.0)),
         "stability_score": float(record.get("stability_score", 0.0)),
         "depth_valid_pixels": depth_valid_pixels,
         "depth_valid_ratio": _safe_ratio(depth_valid_pixels, area_px),
         "object_overlap_ratio": object_overlap_ratio,
+        "source_shape_hw": source_shape,
+        "metrics_shape_hw": [int(value) for value in mask.shape],
     }
 
 
