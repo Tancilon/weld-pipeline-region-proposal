@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 REGION_ROOT = Path(__file__).resolve().parents[2]
 WORKSPACE = REGION_ROOT.parent
@@ -78,3 +79,46 @@ def test_write_region_proposal_writes_valid_json(tmp_path):
     payload = json.loads(output_path.read_text(encoding="utf-8"))
     validate_region_proposal(payload)
     assert payload["focused_parts"]["tube"]["size_source"] == "scale_net"
+    tube = payload["focused_parts"]["tube"]
+    assert tube["size_match_method"] == "square_tube_section_min_xz_v1"
+    assert "size_match_diagnostics" in tube
+
+
+def test_genpose_result_to_part_payload_applies_square_tube_section_prior():
+    registry = WorkpiecePriorRegistry(
+        WORKSPACE / "workpiece_priors/workpiece_info.yaml", repo_root=WORKSPACE
+    )
+
+    payload = genpose_result_to_part_payload(
+        registry=registry,
+        category="square_tube",
+        part_name="tube",
+        mask_path=Path("output/f101/part_masks/tube.png"),
+        genpose_result={
+            "R": np.eye(3, dtype=np.float64),
+            "t": np.array([0.1, 0.2, 0.3], dtype=np.float64),
+            "size": np.array(
+                [0.103909432888031, 0.17806562781333923, 0.11951123178005219],
+                dtype=np.float64,
+            ),
+            "size_source": "scale_net",
+        },
+    )
+
+    assert payload["raw_size_xyz_mm"] == pytest.approx(
+        [
+            103.909432888031,
+            178.06562781333923,
+            119.5112317800522,
+        ]
+    )
+    assert payload["matched_size_xyz_mm"] == [101.0, 201.0, 101.0]
+    assert payload["size_match_method"] == "square_tube_section_min_xz_v1"
+    diagnostics = payload["size_match_diagnostics"]
+    assert diagnostics["section_estimate_mm"] == pytest.approx(103.909432888031)
+    assert diagnostics["length_estimate_mm"] == pytest.approx(178.06562781333923)
+    assert diagnostics["candidate_errors"][0]["candidate_size_xyz_mm"] == [
+        101.0,
+        201.0,
+        101.0,
+    ]
