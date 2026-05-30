@@ -69,7 +69,7 @@ def _part_area_ideal(workpiece_type: str, part_name: str) -> float:
     table = {
         ("cover_plate", "tube"): 0.70,
         ("square_tube", "tube"): 0.55,
-        ("bellmouth", "tube"): 0.45,
+        ("bellmouth", "tube"): 0.65,
         ("bellmouth", "plate"): 0.28,
         ("square_tube", "plate"): 0.25,
     }
@@ -90,6 +90,26 @@ def _score_aspect(bbox_xywh: list[int], ideal: float) -> float:
     height = max(float(bbox_xywh[3]), 1.0)
     aspect = max(width, height) / max(min(width, height), 1.0)
     return _clamp01(1.0 - abs(aspect - ideal) / max(ideal, 1.0))
+
+
+def _max_area_ratio_for_part(
+    workpiece_type: str,
+    part_name: str,
+    default: float,
+) -> float:
+    if workpiece_type == "cover_plate" and part_name == "tube":
+        return max(float(default), 1.05)
+    return float(default)
+
+
+def _min_score_margin_for_part(
+    workpiece_type: str,
+    part_name: str,
+    default: float,
+) -> float:
+    if workpiece_type == "bellmouth" and part_name == "tube":
+        return min(float(default), 0.04)
+    return float(default)
 
 
 def _square_tube_tube_scores(
@@ -172,7 +192,12 @@ def _evaluate_candidate(
         hard_rejection_reasons.append("object_overlap_below_min")
     if area_ratio < min_area_ratio_of_object:
         hard_rejection_reasons.append("area_ratio_below_min")
-    if area_ratio > max_area_ratio_of_object:
+    effective_max_area_ratio = _max_area_ratio_for_part(
+        workpiece_type,
+        part_name,
+        max_area_ratio_of_object,
+    )
+    if area_ratio > effective_max_area_ratio:
         hard_rejection_reasons.append("area_ratio_above_max")
     if depth_valid_pixels < min_depth_valid_pixels:
         hard_rejection_reasons.append("depth_valid_pixels_below_min")
@@ -319,6 +344,11 @@ def select_weld_focus_masks(
                 if second is not None
                 else 1.0
             )
+            effective_min_score_margin = _min_score_margin_for_part(
+                workpiece_type,
+                part_name,
+                min_score_margin,
+            )
             if float(best["score"]) < accept_score_threshold:
                 accepted = bool(allow_low_confidence)
                 reason = (
@@ -326,7 +356,7 @@ def select_weld_focus_masks(
                     if allow_low_confidence
                     else "score_below_threshold"
                 )
-            elif margin < min_score_margin:
+            elif margin < effective_min_score_margin:
                 accepted = bool(allow_low_confidence)
                 reason = "accepted_low_margin" if allow_low_confidence else "score_margin_below_threshold"
             else:

@@ -30,6 +30,39 @@ def _write_mask(
     return path
 
 
+def _write_bbox_area_mask(
+    path: Path,
+    bbox_xywh: list[int],
+    area_px: int,
+    shape: tuple[int, int] = (1080, 1920),
+) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    mask = np.zeros(shape, dtype=np.uint8)
+    x, y, width, height = bbox_xywh
+    capacity = int(width) * int(height)
+    if area_px > capacity:
+        raise ValueError(f"area {area_px} exceeds bbox capacity {capacity}")
+    yy, xx = np.unravel_index(np.arange(area_px), (int(height), int(width)))
+    mask[int(y) + yy, int(x) + xx] = 255
+    Image.fromarray(mask, mode="L").save(path)
+    return path
+
+
+def _bbox_area_object_mask(
+    bbox_xywh: list[int],
+    area_px: int,
+    shape: tuple[int, int] = (1080, 1920),
+) -> np.ndarray:
+    x, y, width, height = bbox_xywh
+    capacity = int(width) * int(height)
+    if area_px > capacity:
+        raise ValueError(f"area {area_px} exceeds bbox capacity {capacity}")
+    mask = np.zeros(shape, dtype=np.bool_)
+    yy, xx = np.unravel_index(np.arange(area_px), (int(height), int(width)))
+    mask[int(y) + yy, int(x) + xx] = True
+    return mask
+
+
 def _candidate(
     mask_id: str,
     mask_path: Path,
@@ -342,3 +375,204 @@ def test_square_tube_tube_prefers_vertical_upper_mask_over_plate_like_mask(tmp_p
     )
     assert ranked["f101_mask_000"]["category_score_components"]["plate_like_penalty"] > 0.30
     assert "area_ratio_above_max" in ranked["f101_mask_002"]["hard_rejection_reasons"]
+
+
+def test_bellmouth_tube_prefers_l75_main_tube_over_bottom_plate(tmp_path):
+    output_root = tmp_path
+    object_area = 124615
+    object_bbox = [908, 223, 360, 513]
+    object_mask = _bbox_area_object_mask(object_bbox, object_area)
+    depth = np.ones(object_mask.shape, dtype=np.float32) * 0.5
+    bottom_plate = _write_bbox_area_mask(
+        output_root / "semantic_sam/l75_masks/l75_mask_004.png",
+        [961, 223, 228, 511],
+        48634,
+    )
+    main_tube = _write_bbox_area_mask(
+        output_root / "semantic_sam/l75_masks/l75_mask_000.png",
+        [908, 267, 360, 229],
+        73896,
+    )
+    lower_plate = _write_bbox_area_mask(
+        output_root / "semantic_sam/l75_masks/l75_mask_002.png",
+        [910, 400, 351, 336],
+        70303,
+    )
+    full_object = _write_bbox_area_mask(
+        output_root / "semantic_sam/l75_masks/l75_mask_001.png",
+        [908, 223, 360, 513],
+        122393,
+    )
+    candidates_path = _write_candidates(
+        output_root,
+        [
+            _candidate(
+                "l75_mask_004",
+                bottom_plate,
+                48634,
+                [961, 223, 228, 511],
+                0.3954435168811942,
+                0.9993625858452934,
+            ),
+            _candidate(
+                "l75_mask_000",
+                main_tube,
+                73896,
+                [908, 267, 360, 229],
+                0.3345377286997943,
+                0.9992421781963841,
+            ),
+            _candidate(
+                "l75_mask_002",
+                lower_plate,
+                70303,
+                [910, 400, 351, 336],
+                0.34934497816593885,
+                0.9998435344153166,
+            ),
+            _candidate(
+                "l75_mask_001",
+                full_object,
+                122393,
+                [908, 223, 360, 513],
+                0.35993071499187046,
+                0.9997957399524483,
+            ),
+        ],
+        workpiece_type="bellmouth",
+    )
+
+    result = select_weld_focus_masks(
+        candidates_path=candidates_path,
+        output_root=output_root,
+        weld_focus=["tube"],
+        object_mask=object_mask,
+        depth=depth,
+    )
+
+    assert result.accepted is True
+    selected = json.loads(result.selected_parts_path.read_text(encoding="utf-8"))
+    assert selected["focused_parts"] == {"tube": "l75_mask_000"}
+    diagnostics = json.loads(
+        (output_root / "auto_part_selection.json").read_text(encoding="utf-8")
+    )
+    tube_payload = diagnostics["focused_parts"]["tube"]
+    ranked = {item["mask_id"]: item for item in tube_payload["candidates"]}
+    assert ranked["l75_mask_000"]["score"] > ranked["l75_mask_004"]["score"]
+    assert "area_ratio_above_max" in ranked["l75_mask_001"]["hard_rejection_reasons"]
+
+
+def test_bellmouth_tube_prefers_l148_body_over_side_plate(tmp_path):
+    output_root = tmp_path
+    object_area = 100000
+    object_bbox = [601, 155, 649, 593]
+    object_mask = _bbox_area_object_mask(object_bbox, object_area)
+    depth = np.ones(object_mask.shape, dtype=np.float32) * 0.5
+    side_plate = _write_bbox_area_mask(
+        output_root / "semantic_sam/l148_masks/l148_mask_000.png",
+        [601, 430, 649, 282],
+        20671,
+    )
+    tube_body = _write_bbox_area_mask(
+        output_root / "semantic_sam/l148_masks/l148_mask_001.png",
+        [736, 155, 421, 582],
+        75340,
+    )
+    full_object = _write_bbox_area_mask(
+        output_root / "semantic_sam/l148_masks/l148_mask_003.png",
+        [601, 155, 649, 593],
+        97932,
+    )
+    candidates_path = _write_candidates(
+        output_root,
+        [
+            _candidate(
+                "l148_mask_000",
+                side_plate,
+                20671,
+                [601, 430, 649, 282],
+                0.3178502281842069,
+                0.9996715530355414,
+            ),
+            _candidate(
+                "l148_mask_001",
+                tube_body,
+                75340,
+                [736, 155, 421, 582],
+                0.3655111246021846,
+                1.0,
+            ),
+            _candidate(
+                "l148_mask_003",
+                full_object,
+                97932,
+                [601, 155, 649, 593],
+                0.35385058855295515,
+                0.9999562142872781,
+            ),
+        ],
+        workpiece_type="bellmouth",
+    )
+
+    result = select_weld_focus_masks(
+        candidates_path=candidates_path,
+        output_root=output_root,
+        weld_focus=["tube"],
+        object_mask=object_mask,
+        depth=depth,
+    )
+
+    assert result.accepted is True
+    selected = json.loads(result.selected_parts_path.read_text(encoding="utf-8"))
+    assert selected["focused_parts"] == {"tube": "l148_mask_001"}
+    diagnostics = json.loads(
+        (output_root / "auto_part_selection.json").read_text(encoding="utf-8")
+    )
+    tube_payload = diagnostics["focused_parts"]["tube"]
+    ranked = {item["mask_id"]: item for item in tube_payload["candidates"]}
+    assert ranked["l148_mask_001"]["score"] > ranked["l148_mask_000"]["score"]
+    assert "area_ratio_above_max" in ranked["l148_mask_003"]["hard_rejection_reasons"]
+
+
+def test_cover_plate_tube_accepts_near_full_roi_tube_mask(tmp_path):
+    output_root = tmp_path
+    object_area = 100000
+    object_bbox = [893, 305, 222, 545]
+    object_mask = _bbox_area_object_mask(object_bbox, object_area)
+    depth = np.ones(object_mask.shape, dtype=np.float32) * 0.5
+    tube_mask = _write_bbox_area_mask(
+        output_root / "semantic_sam/first_g140_masks/first_g140_mask_000.png",
+        object_bbox,
+        97916,
+    )
+    candidates_path = _write_candidates(
+        output_root,
+        [
+            _candidate(
+                "first_g140_mask_000",
+                tube_mask,
+                97916,
+                object_bbox,
+                0.26965787796360635,
+                0.9999820455504386,
+            ),
+        ],
+        workpiece_type="cover_plate",
+    )
+
+    result = select_weld_focus_masks(
+        candidates_path=candidates_path,
+        output_root=output_root,
+        weld_focus=["tube"],
+        object_mask=object_mask,
+        depth=depth,
+    )
+
+    assert result.accepted is True
+    selected = json.loads(result.selected_parts_path.read_text(encoding="utf-8"))
+    assert selected["focused_parts"] == {"tube": "first_g140_mask_000"}
+    diagnostics = json.loads(
+        (output_root / "auto_part_selection.json").read_text(encoding="utf-8")
+    )
+    candidate = diagnostics["focused_parts"]["tube"]["candidates"][0]
+    assert "area_ratio_above_max" not in candidate["hard_rejection_reasons"]

@@ -45,6 +45,7 @@ def test_genpose_result_to_part_payload_converts_meters_to_mm():
     assert payload["raw_size_xyz_m"] == [0.147, 0.199, 0.149]
     assert payload["raw_size_xyz_mm"] == [147.0, 199.0, 149.0]
     assert payload["matched_size_xyz_mm"] == [148.0, 200.0, 148.0]
+    assert payload["size_match_method"] == "per_axis_relative_error_v1"
     assert payload["coarse_pose_source"] == "genpose2"
 
 
@@ -122,3 +123,4 @@ def test_genpose_result_to_part_payload_applies_square_tube_section_prior():
         201.0,
         101.0,
     ]
+
