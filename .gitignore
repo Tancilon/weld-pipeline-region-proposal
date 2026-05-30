@@ -17,4 +17,7 @@ assets_bak/
 .claude/
 *.pth
 Grounded-Segment-Anything/
-Semantic-SAM/
+Semantic-SAM/**/build/
+Semantic-SAM/**/*.egg-info/
+Semantic-SAM/**/*.o
+Semantic-SAM/**/*.so
