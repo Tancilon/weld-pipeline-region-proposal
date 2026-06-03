@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import inspect
 from pathlib import Path
 import sys
 
@@ -9,14 +10,17 @@ from PIL import Image
 
 REGION_ROOT = Path(__file__).resolve().parents[2]
 WORKSPACE = REGION_ROOT.parent
-if str(REGION_ROOT) not in sys.path:
-    sys.path.insert(0, str(REGION_ROOT))
-if str(WORKSPACE) not in sys.path:
-    sys.path.insert(0, str(WORKSPACE))
+for path in (WORKSPACE, REGION_ROOT):
+    if str(path) in sys.path:
+        sys.path.remove(str(path))
+    sys.path.insert(0, str(path))
 for name in [
     module_name
     for module_name in sys.modules
-    if module_name == "adapter" or module_name.startswith("adapter.")
+    if module_name == "adapter"
+    or module_name.startswith("adapter.")
+    or module_name == "components"
+    or module_name.startswith("components.")
 ]:
     sys.modules.pop(name, None)
 
@@ -37,6 +41,12 @@ def _write_rgb_depth_mask(tmp_path: Path) -> tuple[Path, Path, Path]:
     mask[4:14, 5:18] = 255
     Image.fromarray(mask, mode="L").save(mask_path)
     return rgb_path, depth_path, mask_path
+
+
+def test_visual_coarse_uses_region_local_depth_compat():
+    expected_path = REGION_ROOT / "utils/depth_compat.py"
+
+    assert Path(inspect.getfile(visual_coarse.load_depth)).resolve() == expected_path
 
 
 def test_visual_coarse_cover_plate_returns_minimal_result(tmp_path, monkeypatch):

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import importlib.util
 import json
 import shutil
 import subprocess
@@ -11,16 +10,18 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-REGION_ROOT = Path(__file__).resolve().parents[1]
+PACKAGE_ROOT = Path(__file__).resolve().parents[1]
+REGION_ROOT = PACKAGE_ROOT.parent
 PROJECT_ROOT = REGION_ROOT.parent
 for path in (PROJECT_ROOT, REGION_ROOT):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
-from adapter.types import CoarseLocalizationResult
-from components.aiws_pipeline_contracts import validate_region_proposal
-from components.rgbd_size_review import review_standard_size_match
-from components.workpiece_priors import WorkpiecePriorRegistry
+from weld_pipeline_region_proposal.adapter.types import CoarseLocalizationResult
+from weld_pipeline_region_proposal.components.aiws_pipeline_contracts import validate_region_proposal
+from weld_pipeline_region_proposal.components.rgbd_size_review import review_standard_size_match
+from weld_pipeline_region_proposal.components.workpiece_priors import WorkpiecePriorRegistry
+from weld_pipeline_region_proposal.utils.depth_compat import load_depth
 from runners.aiws_auto_part_selection import select_weld_focus_masks
 from runners.aiws_genpose_part import GenPosePartEstimator
 from runners.aiws_object_roi import (
@@ -41,21 +42,6 @@ from runners.aiws_semantic_sam_candidates import (
     build_mask_candidates,
     write_selected_parts_template,
 )
-
-
-def _load_region_depth_compat():
-    module_name = "aiws_region_depth_compat"
-    module_path = REGION_ROOT / "utils/depth_compat.py"
-    spec = importlib.util.spec_from_file_location(module_name, module_path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"failed to load region depth compat: {module_path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module
-    spec.loader.exec_module(module)
-    return module.load_depth
-
-
-load_depth = _load_region_depth_compat()
 
 
 @dataclass(frozen=True)
