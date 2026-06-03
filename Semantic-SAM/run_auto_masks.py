@@ -17,6 +17,9 @@ import numpy as np
 import torch
 from PIL import Image
 
+if not hasattr(Image, "LINEAR"):
+    Image.LINEAR = Image.BILINEAR
+
 from semantic_sam.build_semantic_sam import build_semantic_sam, prepare_image
 from tasks.automatic_mask_generator import SemanticSamAutomaticMaskGenerator
 from tasks.interactive_idino_m2m_auto import show_anns

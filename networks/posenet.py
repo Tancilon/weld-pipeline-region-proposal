@@ -45,7 +45,13 @@ class GFObjectPose(nn.Module):
         self.enable_segmentation = getattr(cfg, 'enable_segmentation', False)
         if cfg.dino != 'none':
             # raw_dino type: DINO v2 instance (torch.nn.Module)
-            raw_dino = torch.hub.load('facebookresearch/dinov2', GFObjectPose.dino_name).to(cfg.device) 
+            dino_repo = os.environ.get("AIWS_DINOV2_TORCH_HUB_REPO", "facebookresearch/dinov2:main")
+            raw_dino = torch.hub.load(
+                dino_repo,
+                GFObjectPose.dino_name,
+                trust_repo=True,
+                skip_validation=True,
+            ).to(cfg.device)
             self.dino_dim = GFObjectPose.dino_dim
             self.embedding_dim = GFObjectPose.embedding_dim
 
