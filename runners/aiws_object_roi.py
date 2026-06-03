@@ -65,6 +65,94 @@ def _masked_full_rgb(rgb: Image.Image, object_mask: np.ndarray) -> Image.Image:
     return Image.fromarray(rgb_array, mode="RGB")
 
 
+def _largest_component_filter(object_mask: np.ndarray) -> tuple[np.ndarray, dict[str, object]]:
+    mask = object_mask.astype(np.bool_)
+    total_area = int(mask.sum())
+    metadata = {
+        "enabled": True,
+        "connectivity": 8,
+        "num_components_before": 0,
+        "kept_area": 0,
+        "removed_area": 0,
+        "removed_area_ratio": 0.0,
+    }
+    if total_area == 0:
+        return mask, metadata
+
+    try:
+        import cv2
+
+        num_labels, labels, stats, _centroids = cv2.connectedComponentsWithStats(
+            mask.astype(np.uint8),
+            connectivity=8,
+        )
+        component_count = int(num_labels - 1)
+        if component_count <= 0:
+            return mask, metadata
+        areas = stats[1:, cv2.CC_STAT_AREA]
+        kept_label = int(np.argmax(areas) + 1)
+        kept_area = int(areas[kept_label - 1])
+        filtered = labels == kept_label
+    except Exception:
+        filtered, component_count, kept_area = _largest_component_filter_numpy(mask)
+
+    removed_area = int(total_area - kept_area)
+    metadata.update(
+        {
+            "num_components_before": int(component_count),
+            "kept_area": int(kept_area),
+            "removed_area": removed_area,
+            "removed_area_ratio": float(removed_area / total_area),
+        }
+    )
+    return filtered.astype(np.bool_), metadata
+
+
+def _largest_component_filter_numpy(mask: np.ndarray) -> tuple[np.ndarray, int, int]:
+    height, width = mask.shape
+    visited = np.zeros(mask.shape, dtype=np.bool_)
+    largest_component: list[tuple[int, int]] = []
+    component_count = 0
+    neighbors = (
+        (-1, -1),
+        (-1, 0),
+        (-1, 1),
+        (0, -1),
+        (0, 1),
+        (1, -1),
+        (1, 0),
+        (1, 1),
+    )
+    for start_y, start_x in zip(*np.where(mask & ~visited)):
+        if visited[start_y, start_x]:
+            continue
+        component_count += 1
+        stack = [(int(start_y), int(start_x))]
+        visited[start_y, start_x] = True
+        component: list[tuple[int, int]] = []
+        while stack:
+            y, x = stack.pop()
+            component.append((y, x))
+            for dy, dx in neighbors:
+                ny = y + dy
+                nx = x + dx
+                if (
+                    0 <= ny < height
+                    and 0 <= nx < width
+                    and mask[ny, nx]
+                    and not visited[ny, nx]
+                ):
+                    visited[ny, nx] = True
+                    stack.append((ny, nx))
+        if len(component) > len(largest_component):
+            largest_component = component
+
+    filtered = np.zeros(mask.shape, dtype=np.bool_)
+    for y, x in largest_component:
+        filtered[y, x] = True
+    return filtered, component_count, len(largest_component)
+
+
 def _write_roi_artifacts(
     rgb_path: Path,
     object_mask: np.ndarray,
@@ -81,6 +169,7 @@ def _write_roi_artifacts(
         raise ObjectRoiError(
             f"object mask shape mismatch: {object_mask.shape} vs {(height, width)}"
         )
+    object_mask, component_filter = _largest_component_filter(object_mask)
     bbox = _bbox_xywh(object_mask)
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -109,6 +198,7 @@ def _write_roi_artifacts(
         "masked_full_rgb_path": _relative(masked_full_rgb_path, output_dir),
         "background_fill_rgb": [255, 255, 255],
         "source_shape_hw": [int(height), int(width)],
+        "component_filter": component_filter,
     }
     roi_metadata_path.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2) + "\n",

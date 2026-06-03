@@ -81,6 +81,46 @@ def test_build_object_roi_from_mask_writes_masked_full_rgb_and_metadata(tmp_path
     assert "crop_bbox_xywh" not in payload
 
 
+def test_build_object_roi_from_mask_keeps_largest_component_and_records_filter(tmp_path):
+    rgb_path = tmp_path / "rgb.png"
+    mask_path = tmp_path / "noisy_mask.png"
+    rgb = np.zeros((12, 14, 3), dtype=np.uint8)
+    rgb[:, :] = [10, 20, 30]
+    Image.fromarray(rgb).save(rgb_path)
+    mask = np.zeros((12, 14), dtype=np.uint8)
+    mask[3:10, 4:12] = 255
+    mask[0, 0] = 255
+    mask[1, 12] = 255
+    mask[11, 2] = 255
+    Image.fromarray(mask, mode="L").save(mask_path)
+
+    result = build_object_roi_from_mask(
+        rgb_path=rgb_path,
+        mask_path=mask_path,
+        output_dir=tmp_path / "out",
+        sample_id="0034",
+        workpiece_type="square_tube",
+        class_id=-1,
+        class_confidence=1.0,
+    )
+
+    expected = np.zeros((12, 14), dtype=bool)
+    expected[3:10, 4:12] = True
+    np.testing.assert_array_equal(result.object_mask, expected)
+    assert result.bbox_xywh == [4, 3, 8, 7]
+    saved = np.asarray(Image.open(result.object_mask_path).convert("L")) > 0
+    np.testing.assert_array_equal(saved, expected)
+    payload = json.loads(result.roi_metadata_path.read_text(encoding="utf-8"))
+    assert payload["component_filter"] == {
+        "enabled": True,
+        "connectivity": 8,
+        "num_components_before": 4,
+        "kept_area": 56,
+        "removed_area": 3,
+        "removed_area_ratio": pytest.approx(3 / 59),
+    }
+
+
 def test_build_object_roi_from_mask_rejects_empty_mask(tmp_path):
     rgb_path = tmp_path / "rgb.png"
     mask_path = tmp_path / "empty.png"
