@@ -13,6 +13,12 @@ if str(REGION_ROOT) not in sys.path:
     sys.path.insert(0, str(REGION_ROOT))
 if str(WORKSPACE) not in sys.path:
     sys.path.insert(0, str(WORKSPACE))
+for name in [
+    module_name
+    for module_name in sys.modules
+    if module_name == "adapter" or module_name.startswith("adapter.")
+]:
+    sys.modules.pop(name, None)
 
 import adapter.visual_coarse as visual_coarse
 from adapter.visual_coarse import (
