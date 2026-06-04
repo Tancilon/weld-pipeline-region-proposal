@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import contextlib
+import io
 import json
+import logging
 import shutil
 import subprocess
 import sys
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -242,11 +246,32 @@ def _semantic_sam_command(
     ]
 
 
+@contextlib.contextmanager
+def _runtime_output_scope(*, quiet: bool):
+    if not quiet:
+        yield
+        return
+
+    previous_disable_level = logging.root.manager.disable
+    logging.disable(logging.WARNING)
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(
+                io.StringIO()
+            ):
+                yield
+    finally:
+        logging.disable(previous_disable_level)
+
+
 def _ensure_semantic_sam(
     config: VisualCoarseRuntimeConfig,
     rgb_path: Path,
     output_dir: Path,
     sample_id: str,
+    *,
+    quiet: bool = False,
 ) -> Path:
     metadata_path = output_dir / "semantic_sam" / f"{sample_id}_metadata.json"
     if metadata_path.exists() and not config.force:
@@ -255,10 +280,23 @@ def _ensure_semantic_sam(
         if not metadata_path.exists():
             raise FileNotFoundError(f"Semantic-SAM metadata not found: {metadata_path}")
         return metadata_path
-    subprocess.run(
-        _semantic_sam_command(config, rgb_path, output_dir, sample_id),
-        check=True,
-    )
+    command = _semantic_sam_command(config, rgb_path, output_dir, sample_id)
+    if quiet:
+        completed = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if completed.returncode != 0:
+            details = (completed.stderr or completed.stdout or "").strip()
+            if len(details) > 1000:
+                details = details[-1000:]
+            raise RuntimeError(
+                f"Semantic-SAM failed with exit code {completed.returncode}: {details}"
+            )
+    else:
+        subprocess.run(command, check=True)
     return metadata_path
 
 
@@ -352,6 +390,28 @@ def visual_coarse_localize_with_config(
     verbose: bool = False,
     config: VisualCoarseRuntimeConfig | None = None,
 ) -> CoarseLocalizationResult:
+    with _runtime_output_scope(quiet=not verbose):
+        return _visual_coarse_localize_with_config_impl(
+            rgb_path=rgb_path,
+            depth_path=depth_path,
+            output_dir=output_dir,
+            workpiece_type=workpiece_type,
+            object_mask_path=object_mask_path,
+            verbose=verbose,
+            config=config,
+        )
+
+
+def _visual_coarse_localize_with_config_impl(
+    rgb_path: str,
+    depth_path: str,
+    output_dir: str,
+    *,
+    workpiece_type: str | None = None,
+    object_mask_path: str | None = None,
+    verbose: bool = False,
+    config: VisualCoarseRuntimeConfig | None = None,
+) -> CoarseLocalizationResult:
     config = config or VisualCoarseRuntimeConfig()
     output = Path(output_dir)
     sample_id = _sample_id(rgb_path)
@@ -399,6 +459,7 @@ def visual_coarse_localize_with_config(
                 object_roi.masked_full_rgb_path,
                 output,
                 sample_id,
+                quiet=not verbose,
             )
             candidates_path = build_mask_candidates(
                 metadata_path=metadata_path,
